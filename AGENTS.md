@@ -92,4 +92,6 @@ Version 1.0.1 is mirrored in: `plugins/docmesh/pyproject.toml`,
 `.claude-plugin/marketplace.json`, `plugins/docmesh/.claude-plugin/plugin.json`,
 `plugins/docmesh/.codex-plugin/plugin.json`, the `serverInfo.version` in
 `src/docmesh/mcp.py` and `scripts/mcp_server.py`, and the assertions in
-`tests/plugin/test_manifests_and_skills.py`. Bump all of them together.
+`tests/plugin/test_manifests_and_skills.py`. Bump all of them together, and
+move the `## [Unreleased]` entries in `CHANGELOG.md` into the new release
+section.
