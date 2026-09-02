@@ -6,6 +6,21 @@ AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-09-02
+
+- When the resolved Python 3.12+ interpreter is missing DocMesh's
+  dependencies, `pyresolve.py` now bootstraps them by running
+  `uv sync --extra test` in the plugin root, then re-checks before
+  falling back to an error. This fixes the MCP server never starting on
+  a fresh install where the plugin's `.venv` was never created (`uv sync`
+  had not been run manually), the common case on machines whose system
+  `python3` is old (e.g. macOS's 3.9).
+- The bootstrap only runs from explicit, user-initiated entrypoints (the
+  MCP server, `entrypoint.py`). Hooks (`post-edit.py`, `stop.py`) and the
+  detached indexing worker pass `bootstrap=False` and keep failing fast
+  instead, preserving the offline contract that hooks never touch the
+  network.
+
 ## [1.0.2] - 2026-09-02
 
 - Fixed `scripts/pyresolve.py` resolving `plugins/docmesh/.venv/bin/python`

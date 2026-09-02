@@ -57,7 +57,10 @@ not project dependencies). Don't add a new one without asking.
   `python3.13`/`python3.12` on PATH, then `uv python find`) and every
   entrypoint (launchers, `mcp_server.py`, `entrypoint.py`, `worker.py`, both
   hooks) re-execs under it. Never reintroduce a hardcoded `python3` assumption,
-  and keep `pyresolve.py` itself parseable on 3.9.
+  and keep `pyresolve.py` itself parseable on 3.9. If the resolved interpreter
+  is missing DocMesh's deps, only `mcp_server.py` and `entrypoint.py` may
+  bootstrap them (`uv sync --extra test`, `ensure_python(bootstrap=True)`,
+  the default); `worker.py` and both hooks must pass `bootstrap=False`.
 - **Offline contract.** Hooks never download anything. Tests never touch the
   network or install a model. Once setup completes, index/search/verify work
   with the network disabled. `setup --dry-run` must write nothing.

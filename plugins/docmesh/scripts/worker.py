@@ -22,7 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from pyresolve import ensure_python
 
-ensure_python()
+ensure_python(bootstrap=False)
 
 from harness import (
     HarnessPaths,

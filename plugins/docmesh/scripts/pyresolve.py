@@ -5,8 +5,10 @@ DocMesh requires Python >= 3.12, but macOS ships the system `python3` as
 Python 3.9.  This module must parse on whatever interpreter launches a
 harness entrypoint, so it stays compatible with Python 3.9.  It either
 re-executes the current script under a suitable interpreter or prints the
-path of one for the shell launchers.  It never downloads or installs
-anything.
+path of one for the shell launchers.  If the resolved interpreter is
+missing DocMesh's dependencies, it bootstraps them by running
+`uv sync --extra test` in the plugin root (only when `uv` is available),
+then re-checks before falling back to a clear error.
 """
 
 from __future__ import annotations
@@ -122,33 +124,66 @@ def _missing_deps(interpreter: str) -> list[str]:
     )
 
 
-def ensure_python(root: Path | None = None) -> None:
-    """Re-execute the current entrypoint under a Python 3.12+ interpreter."""
+def _bootstrap_deps(root: Path) -> bool:
+    """Run `uv sync --extra test` in the plugin root. Returns True on success."""
+    executable = shutil.which("uv")
+    if not executable:
+        return False
+    try:
+        completed = subprocess.run(
+            [executable, "sync", "--extra", "test"],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=600,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def ensure_python(root: Path | None = None, *, bootstrap: bool = True) -> None:
+    """Re-execute the current entrypoint under a Python 3.12+ interpreter.
+
+    `bootstrap` controls whether a missing-deps interpreter triggers
+    `uv sync`. Callers bound by the offline contract (hooks, the detached
+    indexing worker) must pass `bootstrap=False` so they never touch the
+    network; only explicit, user-initiated entrypoints (the MCP server,
+    `entrypoint.py`) may bootstrap.
+    """
     if sys.version_info[:2] >= MINIMUM_PYTHON:
         return
+    plugin_dir = root or plugin_root()
     current = f"{sys.executable} (Python {sys.version_info[0]}.{sys.version_info[1]})"
     if os.environ.get(RESOLVED_MARKER):
         print(
             f"DocMesh requires Python {MINIMUM_VERSION_SPEC}+; found {current}. "
-            "Install Python 3.12+ or run `uv sync --extra test` in plugins/docmesh.",
+            "Install Python 3.12+ or run `uv sync --extra test` in "
+            f"{plugin_dir}.",
             file=sys.stderr,
         )
         raise SystemExit(2)
-    target = resolve_interpreter(root or plugin_root())
+    target = resolve_interpreter(plugin_dir)
     if target is None:
         print(
             f"DocMesh requires Python {MINIMUM_VERSION_SPEC}+ (found {current}), "
             "but no suitable interpreter was found. Install Python 3.12+ or run "
-            "`uv sync --extra test` in plugins/docmesh.",
+            f"`uv sync --extra test` in {plugin_dir}.",
             file=sys.stderr,
         )
         raise SystemExit(2)
     missing = _missing_deps(target)
+    if missing and bootstrap and _bootstrap_deps(plugin_dir):
+        target = resolve_interpreter(plugin_dir) or target
+        missing = _missing_deps(target)
     if missing:
         print(
             f"Found Python 3.12+ at {target}, but it is missing required packages "
-            f"({', '.join(missing)}). Run `uv sync --extra test` in plugins/docmesh "
-            "to install DocMesh's dependencies.",
+            f"({', '.join(missing)}), and `uv sync --extra test` in {plugin_dir} "
+            "did not resolve it. Install uv (https://docs.astral.sh/uv/) or run "
+            "that command manually.",
             file=sys.stderr,
         )
         raise SystemExit(2)

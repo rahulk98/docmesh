@@ -18,7 +18,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from pyresolve import ensure_python
 
-ensure_python()
+ensure_python(bootstrap=False)
 
 from capability_probe import capabilities_for_enforcement, runtime_harness
 from harness import (

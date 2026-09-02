@@ -20,7 +20,7 @@ class ManifestAndSkillTests(unittest.TestCase):
     def test_codex_manifest_declares_shared_assets(self) -> None:
         manifest = self._json(PLUGIN / ".codex-plugin" / "plugin.json")
         self.assertEqual(manifest["name"], "docmesh")
-        self.assertEqual(manifest["version"], "1.0.2")
+        self.assertEqual(manifest["version"], "1.0.3")
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertEqual(manifest["mcpServers"], "./mcp.codex.json")
         self.assertEqual(manifest["hooks"], "./hooks/codex-hooks.json")
@@ -28,7 +28,7 @@ class ManifestAndSkillTests(unittest.TestCase):
     def test_claude_manifest_and_hook_file_exist(self) -> None:
         manifest = self._json(PLUGIN / ".claude-plugin" / "plugin.json")
         self.assertEqual(manifest["name"], "docmesh")
-        self.assertEqual(manifest["version"], "1.0.2")
+        self.assertEqual(manifest["version"], "1.0.3")
         hooks = self._json(PLUGIN / "hooks" / "hooks.json")
         self.assertIn("PostToolUse", hooks["hooks"])
         self.assertIn("Stop", hooks["hooks"])

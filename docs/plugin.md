@@ -34,8 +34,11 @@ Every entrypoint (launchers, MCP server, hooks, worker) resolves a Python
 3.12+ interpreter through `scripts/pyresolve.py` and re-executes under it when
 needed. The resolution prefers the active `VIRTUAL_ENV`, then the plugin
 `.venv`, then `python3.16`/`python3.15`/`python3.14`/`python3.13`/`python3.12`,
-the default `python3`/`python`, and finally `uv python find`. It never
-downloads anything, so the launchers and hooks stay offline after setup.
+the default `python3`/`python`, and finally `uv python find`. If the
+resolved interpreter is missing DocMesh's dependencies, the MCP server and
+`entrypoint.py` bootstrap them by running `uv sync --extra test` in the
+plugin root before falling back to an error; hooks and the detached worker
+never do this (`bootstrap=False`), so they stay offline after setup.
 
 ## MCP surface
 
