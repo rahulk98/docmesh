@@ -6,8 +6,19 @@ AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-02
+
+- Fixed `scripts/pyresolve.py` resolving `plugins/docmesh/.venv/bin/python`
+  to its symlink target (the bare uv-managed interpreter) instead of the
+  venv path itself, which bypassed the venv's site-packages and made the
+  MCP server (launched via `python3`) unable to find `fastembed`, `pypdf`,
+  or `sqlite-vec` even when the venv was fully set up.
+- `pyresolve.py` now checks the resolved interpreter for these packages
+  and fails with a clear message pointing at `uv sync --extra test`
+  instead of re-executing into an interpreter that crashes with a raw
+  `ModuleNotFoundError`.
 - Discovery (`setup`/`init` dry runs) now prunes excluded directories
-  (`.venv`, `dist/`, `node_modules`, `__pycache__`, `*.egg-info`, …) and
+  (`.venv`, `dist/`, `node_modules`, `__pycache__`, `*.egg-info`, etc.) and
   records each one once instead of emitting an entry per contained file.
   Reports on repositories with virtual environments went from megabytes
   to a few kilobytes, with no change to which sources are included.
