@@ -21,6 +21,7 @@ MINIMUM_PYTHON = (3, 12)
 MINIMUM_VERSION_SPEC = "3.12"
 RESOLVED_MARKER = "DOCMESH_PYTHON_RESOLVED"
 CANDIDATE_MINORS = range(16, 11, -1)  # python3.16 ... python3.12
+REQUIRED_MODULES = ("fastembed", "pypdf", "sqlite_vec")
 
 
 def scripts_dir() -> Path:
@@ -81,7 +82,7 @@ def candidates(root: Path) -> list[str]:
         if location in seen:
             return
         seen.add(location)
-        ordered.append(location)
+        ordered.append(value)
 
     virtual = os.environ.get("VIRTUAL_ENV")
     if virtual:
@@ -102,6 +103,25 @@ def resolve_interpreter(root: Path | None = None) -> str | None:
     return None
 
 
+def _missing_deps(interpreter: str) -> list[str]:
+    probe = "; ".join(f"import {name}" for name in REQUIRED_MODULES)
+    try:
+        completed = subprocess.run(
+            [interpreter, "-c", probe],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return list(REQUIRED_MODULES)
+    if completed.returncode == 0:
+        return []
+    return [name for name in REQUIRED_MODULES if name not in (completed.stderr or "")] or list(
+        REQUIRED_MODULES
+    )
+
+
 def ensure_python(root: Path | None = None) -> None:
     """Re-execute the current entrypoint under a Python 3.12+ interpreter."""
     if sys.version_info[:2] >= MINIMUM_PYTHON:
@@ -120,6 +140,15 @@ def ensure_python(root: Path | None = None) -> None:
             f"DocMesh requires Python {MINIMUM_VERSION_SPEC}+ (found {current}), "
             "but no suitable interpreter was found. Install Python 3.12+ or run "
             "`uv sync --extra test` in plugins/docmesh.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    missing = _missing_deps(target)
+    if missing:
+        print(
+            f"Found Python 3.12+ at {target}, but it is missing required packages "
+            f"({', '.join(missing)}). Run `uv sync --extra test` in plugins/docmesh "
+            "to install DocMesh's dependencies.",
             file=sys.stderr,
         )
         raise SystemExit(2)
