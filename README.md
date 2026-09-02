@@ -40,6 +40,11 @@ search, and retrieval all work **offline** with the network disabled.
 
 Core dependencies: `fastembed`, `pypdf`, `sqlite-vec`.
 
+> On macOS the system `python3` is often 3.9. DocMesh's launchers, MCP server,
+> hooks, and worker automatically resolve a Python 3.12+ interpreter (the
+> plugin `.venv`, `python3.13`/`python3.12`, or `uv python find`) and
+> re-execute under it, so no manual `python3` path configuration is needed.
+
 ## Quick start
 
 ```sh

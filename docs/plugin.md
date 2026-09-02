@@ -27,6 +27,16 @@ packaging; it receives one JSON request on stdin and the operation name as an
 argument. A normal installation falls back to `python -m docmesh`. Core errors
 are returned as JSON and never masquerade as a successful index.
 
+## Interpreter resolution
+
+DocMesh requires Python 3.12+, but macOS ships the system `python3` as 3.9.
+Every entrypoint (launchers, MCP server, hooks, worker) resolves a Python
+3.12+ interpreter through `scripts/pyresolve.py` and re-executes under it when
+needed. The resolution prefers the active `VIRTUAL_ENV`, then the plugin
+`.venv`, then `python3.16`/`python3.15`/`python3.14`/`python3.13`/`python3.12`,
+the default `python3`/`python`, and finally `uv python find`. It never
+downloads anything, so the launchers and hooks stay offline after setup.
+
 ## MCP surface
 
 The stdio server exposes setup, init, index, status, doctor, probe-hooks,
