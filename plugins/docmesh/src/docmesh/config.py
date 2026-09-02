@@ -42,6 +42,7 @@ DEFAULT_EXCLUDES = (
     "node_modules",
     "build",
     "dist",
+    "*.egg-info",
     "__pycache__",
     ".tox",
     ".mypy_cache",
@@ -186,27 +187,19 @@ def discover_corpus(
 
     included: list[DiscoveryItem] = []
     excluded: list[Exclusion] = []
-    candidates = list(root_path.rglob("*"))
-    # A manifest may deliberately point outside the project (for example to a
-    # shared thesis bibliography).  Include those exact files without walking
-    # their entire parent directory.
-    for configured_item in configured.values():
-        configured_path = Path(canonical_path(configured_item.path, base=root_path))
-        if configured_path.is_file() and configured_path not in candidates:
-            candidates.append(configured_path)
-    for candidate in sorted(candidates, key=lambda item: item.as_posix()):
-        if not candidate.is_file():
-            continue
+    seen: set[str] = set()
+
+    def consider(candidate: Path) -> None:
         relative = _relative(candidate, root_path)
-        # Excluded directories are recorded once per source, which makes the
-        # report useful without producing enormous directory listings.
         parts = Path(relative).parts
-        excluded_part = next((part for part in parts if part in DEFAULT_EXCLUDES), None)
+        excluded_part = next(
+            (part for part in parts if part in DEFAULT_EXCLUDES), None
+        )
         if excluded_part or _matches(relative, exclude_patterns):
             excluded.append(
                 Exclusion(str(candidate), "excluded by manifest/default rule")
             )
-            continue
+            return
         fmt = source_format(candidate)
         if fmt is None:
             excluded.append(
@@ -215,7 +208,7 @@ def discover_corpus(
                     "unsupported format (V1 supports Markdown/MDX/LaTeX/BibTeX/text/PDF)",
                 )
             )
-            continue
+            return
         # Exact configured external paths are authoritative; normal in-project
         # files still obey include globs.
         is_exact_configured = canonical_path(candidate) in configured
@@ -227,11 +220,11 @@ def discover_corpus(
             excluded.append(
                 Exclusion(str(candidate), "not matched by manifest include rule")
             )
-            continue
+            return
         matched_config = configured.get(canonical_path(candidate))
         if matched_config and not matched_config.enabled:
             excluded.append(Exclusion(str(candidate), "disabled in manifest"))
-            continue
+            return
         if matched_config:
             role = matched_config.role
             reason = "role assigned by manifest"
@@ -241,6 +234,37 @@ def discover_corpus(
         included.append(
             DiscoveryItem(str(candidate), role, fmt, reason, generated_from)
         )
+
+    def visit(directory: Path) -> None:
+        for entry in sorted(directory.iterdir(), key=lambda item: item.name):
+            if entry.is_dir() and not entry.is_symlink():
+                relative = _relative(entry, root_path)
+                parts = Path(relative).parts
+                excluded_part = next(
+                    (part for part in parts if part in DEFAULT_EXCLUDES), None
+                )
+                if excluded_part or _matches(relative, exclude_patterns):
+                    # Record an excluded directory once instead of once per
+                    # contained file, keeping dry-run reports bounded.
+                    excluded.append(
+                        Exclusion(str(entry), "excluded by manifest/default rule")
+                    )
+                    continue
+                visit(entry)
+                continue
+            if entry.is_file():
+                seen.add(str(entry))
+                consider(entry)
+
+    visit(root_path)
+
+    # A manifest may deliberately point outside the project (for example to a
+    # shared thesis bibliography).  Include those exact files without walking
+    # their entire parent directory.
+    for configured_item in configured.values():
+        configured_path = Path(canonical_path(configured_item.path, base=root_path))
+        if configured_path.is_file() and str(configured_path) not in seen:
+            consider(configured_path)
 
     role_order = {"editable": 0, "reference": 1, "mirror": 2}
     included.sort(key=lambda item: (role_order.get(item.role, 99), item.path))
