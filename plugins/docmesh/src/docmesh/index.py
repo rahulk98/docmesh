@@ -34,6 +34,12 @@ from .parsing import ParsedDocument, parse_file
 SCHEMA_VERSION = "1"
 FTS_SYNC_VERSION = "1"
 
+# Embedding is batched so onnxruntime never materializes one giant tensor:
+# a batch of N passages needs N x seq_len x hidden_dim x 2 bytes of
+# activations (5351 chunks -> ~4GB as a single call). 64 keeps the peak
+# around ~50MB regardless of corpus or document size.
+EMBED_BATCH_SIZE = 64
+
 
 class ChangedFiles(TypedDict):
     changed: list[str]
@@ -140,18 +146,23 @@ class SQLiteIndex:
             # index. Rehydrate it from the canonical portable rows so a newly
             # available extension never returns an empty vector channel.  A
             # reopened connection can reuse a synchronized table without
-            # rewriting every vector.
-            portable_rows = list(
-                self.conn.execute("SELECT chunk_id, dimensions, vector FROM vectors")
-            )
-            if any(int(row["dimensions"]) != dimensions for row in portable_rows):
+            # rewriting every vector.  Compare id sets only; materializing
+            # every vector BLOB at startup would spike memory on large
+            # corpora, and vec0 stays incrementally synchronized in practice.
+            portable_dim = self.conn.execute(
+                "SELECT dimensions FROM vectors LIMIT 1"
+            ).fetchone()
+            if portable_dim is not None and int(portable_dim[0]) != dimensions:
                 # The owning Indexer will clear/rebuild portable vectors when
                 # its strategy changed. Keep the correctly dimensioned vec0
                 # table ready for those fresh rows instead of disabling it.
                 self.conn.execute("DELETE FROM docmesh_vec")
                 self.conn.commit()
                 return True
-            portable_ids = {int(row["chunk_id"]) for row in portable_rows}
+            portable_ids = {
+                int(row[0])
+                for row in self.conn.execute("SELECT chunk_id FROM vectors")
+            }
             vec_ids = {
                 int(row[0])
                 for row in self.conn.execute("SELECT rowid FROM docmesh_vec")
@@ -160,7 +171,9 @@ class SQLiteIndex:
                 return True
             with self.conn:
                 self.conn.execute("DELETE FROM docmesh_vec")
-                for row in portable_rows:
+                for row in self.conn.execute(
+                    "SELECT chunk_id, dimensions, vector FROM vectors"
+                ):
                     self._insert_vec(
                         int(row["chunk_id"]),
                         blob_to_vector(row["vector"], row["dimensions"]),
@@ -331,6 +344,33 @@ class SQLiteIndex:
             self.conn.execute("SELECT * FROM documents WHERE active=1 ORDER BY path")
         )
 
+    def document_paths(self) -> set[str]:
+        """Paths only; ``documents()`` pulls every content column into memory."""
+        return {
+            str(row[0])
+            for row in self.conn.execute(
+                "SELECT path FROM documents WHERE active=1"
+            )
+        }
+
+    def document_meta(self) -> list[sqlite3.Row]:
+        """Lightweight rows for hash comparisons without full document text."""
+        return list(
+            self.conn.execute(
+                "SELECT path, role, format, file_hash FROM documents WHERE active=1 ORDER BY path"
+            )
+        )
+
+    def count_documents(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM documents WHERE active=1"
+        ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def count_chunks(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+        return 0 if row is None else int(row[0])
+
     def chunks(self, path: str | None = None) -> list[sqlite3.Row]:
         if path is None:
             return list(
@@ -413,10 +453,15 @@ class SQLiteIndex:
                     "INSERT INTO chunks_fts(rowid,breadcrumb,text) VALUES(?,?,?)",
                     (chunk_id, chunk.breadcrumb, chunk.text),
                 )
-                values = list(vector)
+                if isinstance(vector, bytes):
+                    blob = vector
+                    values = blob_to_vector(blob)
+                else:
+                    values = list(vector)
+                    blob = vector_to_blob(values)
                 self.conn.execute(
                     "INSERT INTO vectors(chunk_id,dimensions,vector) VALUES(?,?,?)",
-                    (chunk_id, len(values), vector_to_blob(values)),
+                    (chunk_id, len(values), blob),
                 )
                 self._insert_vec(chunk_id, values)
             self._mark_fts_synchronized()
@@ -699,12 +744,36 @@ class Indexer:
         role, reason, generated_from = infer_role(path, fmt, root=self.root)
         return DiscoveryItem(path, role, fmt, reason, generated_from)
 
-    def _parse_for_index(self, item: DiscoveryItem) -> ParsedDocument:
-        parsed = parse_file(item.path)
+    def _parse_for_index(
+        self, item: DiscoveryItem, *, data: bytes | None = None
+    ) -> ParsedDocument:
+        parsed = parse_file(item.path, data=data)
         # ParsedDocument remains format focused; role is attached dynamically to
         # keep it compatible with parsers used independently by callers.
         parsed.role = item.role  # type: ignore[attr-defined]
         return parsed
+
+    def _embed_chunk_batches(self, chunks: Sequence[Chunk]) -> list[bytes]:
+        """Embed chunks in bounded batches, returning serialized blobs.
+
+        A single ``embed_passages`` call over every chunk of a document makes
+        onnxruntime build one padded tensor of N x token_budget activations
+        (hours-of-thesis corpora held ~6-7GB that way).  Batching keeps the
+        transient tensor ~50MB and vectors are stored as 1.5KB BLOBs instead
+        of 12KB Python float lists.
+        """
+        blobs: list[bytes] = []
+        for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+            batch = chunks[start : start + EMBED_BATCH_SIZE]
+            vectors = embed_passages(
+                self.embedder, [chunk.embedding_input for chunk in batch]
+            )
+            if len(vectors) != len(batch):
+                raise ValueError(
+                    "embedding backend must return one vector per chunk"
+                )
+            blobs.extend(vector_to_blob(list(embedding)) for embedding in vectors)
+        return blobs
 
     def _current_discovery(self) -> list[DiscoveryItem]:
         report = discover_corpus(
@@ -722,23 +791,43 @@ class Indexer:
             raise ModelNotInstalledError(
                 "FastEmbed model is not loaded; cannot rebuild vectors"
             )
-        rows = self.store.chunks()
-        self.store.clear_vectors()
-        if rows:
-            vectors = embed_passages(
-                self.embedder, [row["embedding_input"] for row in rows]
+        # One transaction so a crash mid-refresh cannot leave the vector
+        # tables partially rewritten while the strategy metadata already
+        # names the new one.  Chunks stream in bounded batches instead of
+        # loading every embedding input (and rebuilding every vector) at once.
+        with self.store.conn:
+            self.store.conn.execute("DELETE FROM vectors")
+            if self.store.sqlite_vec_available and self.store._vec_table_name:
+                try:
+                    self.store.conn.execute("DELETE FROM docmesh_vec")
+                except sqlite3.DatabaseError:
+                    self.store._vec_table_name = None
+            cursor = self.store.conn.execute(
+                "SELECT id, embedding_input FROM chunks ORDER BY id"
             )
-            if len(vectors) != len(rows):
-                raise ValueError("embedding backend must return one vector per chunk")
-            with self.store.conn:
-                for row, vector in zip(rows, vectors):
+            inserted = 0
+            while True:
+                batch = cursor.fetchmany(EMBED_BATCH_SIZE)
+                if not batch:
+                    break
+                vectors = embed_passages(
+                    self.embedder,
+                    [row["embedding_input"] for row in batch],
+                )
+                if len(vectors) != len(batch):
+                    raise ValueError(
+                        "embedding backend must return one vector per chunk"
+                    )
+                for row, vector in zip(batch, vectors):
+                    values = list(vector)
                     self.store.conn.execute(
                         "INSERT INTO vectors(chunk_id,dimensions,vector) VALUES(?,?,?)",
-                        (row["id"], len(vector), vector_to_blob(vector)),
+                        (row["id"], len(values), vector_to_blob(values)),
                     )
-                    self.store._insert_vec(int(row["id"]), vector)
+                    self.store._insert_vec(int(row["id"]), values)
+                inserted += len(batch)
         self.strategy_changed = False
-        return bool(rows)
+        return bool(inserted)
 
     def index(
         self, paths: Sequence[str | Path] | None = None, *, force: bool = False
@@ -765,7 +854,8 @@ class Indexer:
                     self.store.remove_document(path)
                     changed = True
                 continue
-            raw_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            raw = Path(path).read_bytes()
+            raw_hash = hashlib.sha256(raw).hexdigest()
             existing = self.store.document(path)
             if (
                 existing is not None
@@ -775,17 +865,15 @@ class Indexer:
                 and not force
             ):
                 continue
-            parsed = self._parse_for_index(item)
+            parsed = self._parse_for_index(item, data=raw)
             chunks = chunker.chunk_document(
                 parsed.path, parsed.sections, text_hash=raw_hash
             )
-            vectors = embed_passages(
-                self.embedder, [chunk.embedding_input for chunk in chunks]
-            )
+            vectors = self._embed_chunk_batches(chunks)
             self.store.replace_document(parsed, chunks, vectors)
             changed = True
         if full_scan:
-            existing_paths = {row["path"] for row in self.store.documents()}
+            existing_paths = self.store.document_paths()
             for path in sorted(existing_paths - seen):
                 self.store.remove_document(path)
                 changed = True
@@ -802,7 +890,7 @@ class Indexer:
 
     def _compute_indexed_revision(self) -> str:
         digest = hashlib.sha256()
-        for row in self.store.documents():
+        for row in self.store.document_meta():
             digest.update(row["path"].encode("utf-8"))
             digest.update(b"\0")
             digest.update(row["file_hash"].encode("ascii"))
@@ -811,7 +899,7 @@ class Indexer:
         return digest.hexdigest()
 
     def current_file_hashes(self) -> dict[str, str]:
-        paths = {row["path"] for row in self.store.documents()}
+        paths = self.store.document_paths()
         try:
             paths.update(item.path for item in self._current_discovery())
         except (FileNotFoundError, NotADirectoryError):
@@ -854,15 +942,15 @@ class Indexer:
     def status(self) -> IndexStatus:
         stale: list[str] = []
         hashes = self.current_file_hashes()
-        for row in self.store.documents():
+        for row in self.store.document_meta():
             if hashes.get(row["path"]) != row["file_hash"]:
                 stale.append(row["path"])
         backend_ready = self.embedder is not None and hasattr(
             self.embedder, "local_files_only"
         )
         return IndexStatus(
-            documents=len(self.store.documents()),
-            chunks=len(self.store.chunks()),
+            documents=self.store.count_documents(),
+            chunks=self.store.count_chunks(),
             corpus_revision=self.store.corpus_revision,
             edit_generation=self.store.edit_generation,
             embedding_strategy_id=self.strategy_id,

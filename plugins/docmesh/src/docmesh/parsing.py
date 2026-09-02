@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -198,7 +199,7 @@ def parse_text(path: str, text: str, fmt: str | None = None) -> ParsedDocument:
     return ParsedDocument(canonical_path(path), fmt, text, sections)
 
 
-def _parse_pdf(path: Path) -> ParsedDocument:
+def _parse_pdf(path: Path, data: bytes | None = None) -> ParsedDocument:
     try:
         from pypdf import PdfReader
     except (
@@ -208,7 +209,8 @@ def _parse_pdf(path: Path) -> ParsedDocument:
             "PDF support requires the pypdf dependency"
         ) from exc
     try:
-        reader = PdfReader(str(path))
+        stream = io.BytesIO(data) if data is not None else str(path)
+        reader = PdfReader(stream)
         pages = [(page.extract_text() or "") for page in reader.pages]
     except Exception as exc:
         raise UnsupportedDocumentError(
@@ -232,8 +234,14 @@ def _parse_pdf(path: Path) -> ParsedDocument:
     )
 
 
-def parse_file(path: str | Path) -> ParsedDocument:
-    """Read and parse one supported file."""
+def parse_file(
+    path: str | Path, *, data: bytes | None = None
+) -> ParsedDocument:
+    """Read and parse one supported file.
+
+    ``data`` lets callers that already read the file (for hashing, say)
+    avoid re-reading it; PDFs then parse from the in-memory copy too.
+    """
 
     path_obj = Path(path).expanduser().resolve(strict=False)
     fmt = source_format(path_obj)
@@ -241,10 +249,11 @@ def parse_file(path: str | Path) -> ParsedDocument:
         raise UnsupportedDocumentError(
             f"unsupported document format: {path_obj.suffix}"
         )
-    data = path_obj.read_bytes()
+    if data is None:
+        data = path_obj.read_bytes()
     file_hash = hashlib.sha256(data).hexdigest()
     if fmt == "pdf":
-        parsed = _parse_pdf(path_obj)
+        parsed = _parse_pdf(path_obj, data)
     else:
         text = data.decode("utf-8", errors="replace")
         parsed = parse_text(str(path_obj), text, fmt)

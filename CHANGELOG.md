@@ -6,6 +6,25 @@ AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-09-02
+
+- Indexing memory: embeddings are now computed in bounded batches
+  (`EMBED_BATCH_SIZE = 64`) instead of one multi-GB onnxruntime call per
+  document or per corpus re-embed. A thesis-sized corpus that peaked at
+  ~6.7 GB of RSS now indexes at ~2.2 GB, with identical results; vectors
+  are serialized straight to BLOBs instead of 12 KB Python float lists.
+- Corpus-wide vector refresh (embedding-strategy change) streams chunks
+  lazily in batches and runs in one transaction, so an interrupted
+  re-embed can no longer leave the vector tables partially rewritten
+  while the strategy metadata already names the new one.
+- `status`/revision/hash checks use `COUNT(*)` and lightweight column
+  selects instead of loading every document and chunk (full text
+  included) into memory; vec0 rehydration compares id sets and streams
+  BLOBs instead of materializing all vectors at startup.
+- Files are read once during indexing: the bytes read for hashing are
+  reused for parsing, and PDFs decode from that in-memory copy instead of
+  re-reading the file a second time.
+
 ## [1.0.3] - 2026-09-02
 
 - When the resolved Python 3.12+ interpreter is missing DocMesh's

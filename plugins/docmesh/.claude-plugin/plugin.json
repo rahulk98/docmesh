@@ -1,6 +1,6 @@
 {
   "name": "docmesh",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Offline-capable, recall-first document retrieval and consistency workflows.",
   "author": {
     "name": "DocMesh contributors"
