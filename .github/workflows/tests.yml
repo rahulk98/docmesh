@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check uv
+      - run: uv sync --python 3.12 --extra test
+        working-directory: plugins/docmesh
+      - run: uv run --python 3.12 pytest -q tests
+        working-directory: plugins/docmesh

@@ -1,0 +1,32 @@
+[project]
+name = "docmesh"
+version = "1.0.0"
+description = "Local, offline-capable document retrieval and consistency workflow"
+readme = { text = "DocMesh is a local, recall-first document consistency engine.", content-type = "text/markdown" }
+requires-python = ">=3.12"
+dependencies = [
+  "fastembed>=0.4.0",
+  "pypdf>=5.0.0",
+  "sqlite-vec>=0.1.6",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+docmesh = "docmesh.cli:main"
+docmesh-mcp = "docmesh.mcp:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/core", "tests/retrieval"]
+pythonpath = ["src"]

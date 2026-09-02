@@ -1,0 +1,20 @@
+{
+  "name": "docmesh",
+  "version": "1.0.0",
+  "description": "Offline-capable, recall-first document retrieval and consistency workflows.",
+  "author": {
+    "name": "DocMesh contributors"
+  },
+  "homepage": "https://github.com/rahulk98/docmesh",
+  "repository": "https://github.com/rahulk98/docmesh",
+  "license": "MIT",
+  "keywords": [
+    "documents",
+    "retrieval",
+    "consistency",
+    "impact-analysis"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json"
+}

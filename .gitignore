@@ -209,6 +209,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Keep the portable corpus manifest trackable; ignore all machine-local state.
+.docmesh/*
+!.docmesh/manifest.toml
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

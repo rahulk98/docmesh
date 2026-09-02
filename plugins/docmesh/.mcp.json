@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "docmesh": {
+      "title": "DocMesh",
+      "description": "Local document retrieval and recall-first consistency verification.",
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp_server.py"
+      ],
+      "env": {
+        "DOCMESH_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+      },
+      "tool_timeout_sec": 120
+    }
+  }
+}

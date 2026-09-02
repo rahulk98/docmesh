@@ -1,0 +1,14 @@
+{
+  "docmesh": {
+    "title": "DocMesh",
+    "description": "Local document retrieval and recall-first consistency verification.",
+    "command": "python3",
+    "args": [
+      "${PLUGIN_ROOT}/scripts/mcp_server.py"
+    ],
+    "env": {
+      "DOCMESH_PLUGIN_ROOT": "${PLUGIN_ROOT}"
+    },
+    "tool_timeout_sec": 120
+  }
+}

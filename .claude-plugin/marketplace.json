@@ -1,0 +1,20 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "docmesh",
+  "metadata": {
+    "description": "Offline-capable, recall-first document retrieval and consistency workflows for coding agents.",
+    "version": "1.0.0"
+  },
+  "owner": {
+    "name": "DocMesh contributors",
+    "url": "https://github.com/rahulk98/docmesh"
+  },
+  "plugins": [
+    {
+      "name": "docmesh",
+      "source": "./plugins/docmesh",
+      "description": "Index, search, and safely verify conceptual documentation edits.",
+      "category": "developer-tools"
+    }
+  ]
+}

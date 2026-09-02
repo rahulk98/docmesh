@@ -1,0 +1,33 @@
+{
+  "description": "DocMesh durable freshness and verification hooks for Claude Code.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|NotebookEdit|ApplyPatch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "DOCMESH_RUNTIME=claude python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/post-edit.py\"",
+            "timeout": 20,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "DOCMESH_RUNTIME=claude python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.py\"",
+            "timeout": 20,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

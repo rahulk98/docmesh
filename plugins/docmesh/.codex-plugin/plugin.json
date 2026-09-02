@@ -1,0 +1,40 @@
+{
+  "name": "docmesh",
+  "version": "1.0.0",
+  "description": "Offline-capable, recall-first document retrieval and consistency workflows.",
+  "author": {
+    "name": "DocMesh contributors",
+    "url": "https://github.com/rahulk98/docmesh"
+  },
+  "homepage": "https://github.com/rahulk98/docmesh",
+  "repository": "https://github.com/rahulk98/docmesh",
+  "license": "MIT",
+  "keywords": [
+    "documents",
+    "retrieval",
+    "consistency",
+    "fts5",
+    "impact-analysis"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.codex.json",
+  "hooks": "./hooks/codex-hooks.json",
+  "interface": {
+    "displayName": "DocMesh",
+    "shortDescription": "Find and verify documentation concepts across a project",
+    "longDescription": "DocMesh indexes Markdown, MDX, LaTeX, BibTeX, text, and text-bearing PDFs locally. It supports precision search and a recall-first global-edit workflow with source-validated locations, immutable baselines, and strict verification.",
+    "developerName": "DocMesh contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Set up DocMesh for this project and explain the corpus roles.",
+      "Search the indexed documentation for this concept.",
+      "Apply this conceptual documentation change with global discovery and verification."
+    ],
+    "brandColor": "#2563EB"
+  }
+}
