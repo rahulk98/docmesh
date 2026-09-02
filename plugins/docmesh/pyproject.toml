@@ -1,6 +1,6 @@
 [project]
 name = "docmesh"
-version = "1.0.0"
+version = "1.0.1"
 description = "Local, offline-capable document retrieval and consistency workflow"
 readme = { text = "DocMesh is a local, recall-first document consistency engine.", content-type = "text/markdown" }
 requires-python = ">=3.12"
