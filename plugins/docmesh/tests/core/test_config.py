@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from docmesh import api
 from docmesh.config import (
     ApprovalRequired,
     discover_corpus,
@@ -53,3 +54,64 @@ def test_role_inference_uses_exact_directory_components_relative_to_root(
         )
         assert role == "mirror"
         assert generated_from == directory
+
+
+def test_discovery_summary_bounds_lists_and_counts_by_role_format_and_reason(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "guide.md").write_text("# Guide\nA source.", encoding="utf-8")
+    (tmp_path / "paper.pdf").write_bytes(b"not a pdf")
+    (tmp_path / "assets").mkdir()
+    for index in range(12):
+        (tmp_path / "assets" / f"image-{index}.png").write_bytes(b"\x89PNG")
+    report = discover_corpus(tmp_path)
+
+    summary = report.summary_dict(included_samples=1, excluded_samples=4)
+    assert summary["summary"]["included"]["total"] == 2
+    assert summary["summary"]["included"]["by_role"] == {
+        "editable": 1,
+        "reference": 1,
+    }
+    assert summary["summary"]["included"]["by_format"] == {
+        "markdown": 1,
+        "pdf": 1,
+    }
+    assert summary["summary"]["included"]["includes_all"] is False
+    assert len(summary["included"]) == 1
+    assert summary["summary"]["excluded"]["total"] == 12
+    assert summary["summary"]["excluded"]["by_reason"] == {
+        "unsupported format (V1 supports Markdown/MDX/LaTeX/BibTeX/text/PDF)": 12
+    }
+    assert len(summary["excluded"]) == 4
+    assert summary["summary"]["excluded"]["includes_all"] is False
+    assert summary["estimated_documents"] == 2
+    assert summary["root"] == str(tmp_path.resolve())
+
+    full = report.to_dict()
+    assert len(full["excluded"]) == 12
+    assert len(full["included"]) == 2
+
+
+def test_setup_and_init_default_to_bounded_summary_reports(tmp_path: Path) -> None:
+    (tmp_path / "guide.md").write_text("# Guide\nA source.", encoding="utf-8")
+    for index in range(220):
+        (tmp_path / f"image-{index}.png").write_bytes(b"\x89PNG")
+
+    dry_report = api.setup(tmp_path, dry_run=True)
+    assert "summary" in dry_report
+    assert dry_report["summary"]["included"]["total"] == 1
+    assert dry_report["summary"]["excluded"]["total"] == 220
+    assert len(dry_report["excluded"]) < 220
+    assert len(dry_report["excluded"]) == dry_report["summary"]["excluded"]["sampled"]
+    assert dry_report["summary"]["excluded"]["includes_all"] is False
+
+    detailed = api.setup(tmp_path, dry_run=True, summary=False)
+    assert "summary" not in detailed
+    assert len(detailed["excluded"]) == 220
+    assert len(detailed["included"]) == 1
+
+    bounded_both = api.setup(
+        tmp_path, dry_run=True, included_samples=0, excluded_samples=1
+    )
+    assert bounded_both["included"] == []
+    assert len(bounded_both["excluded"]) == 1

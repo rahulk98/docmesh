@@ -26,6 +26,58 @@ def test_index_search_find_and_read_use_exact_current_locations(tmp_path: Path) 
     assert read.content == "The canonical policy applies."
 
 
+def test_indexer_skips_corrupt_pdf_and_keeps_indexing_the_rest(tmp_path: Path) -> None:
+    (tmp_path / "guide.md").write_text(
+        "# Guide\nThe canonical policy applies.", encoding="utf-8"
+    )
+    (tmp_path / "corrupt.pdf").write_bytes(b"<!doc truncated")
+    indexer = Indexer(
+        tmp_path, index=SQLiteIndex(":memory:"), embedder=DeterministicEmbedder(32)
+    )
+    status = indexer.index()
+    assert status.documents == 1
+    assert len(status.skipped_documents) == 1
+    assert status.skipped_documents[0]["path"].endswith("corrupt.pdf")
+    assert status.skipped_documents[0]["reason"]
+    assert not indexer.store.document(str((tmp_path / "corrupt.pdf").resolve()))
+    results = RetrievalService(indexer).search("canonical policy", limit=2)
+    assert results and results[0].location.path.endswith("guide.md")
+
+    status = indexer.index(force=True)
+    assert status.documents == 1
+    assert len(status.skipped_documents) == 1
+
+
+def test_search_snippets_are_concise_and_centered_on_the_match(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "guide.md").write_text(
+        "# Guide\n" + ("filler text " * 120) + "needle phrase\n"
+        + ("mop up " * 120),
+        encoding="utf-8",
+    )
+    indexer = Indexer(
+        tmp_path, index=SQLiteIndex(":memory:"), embedder=DeterministicEmbedder(32)
+    )
+    indexer.index()
+    service = RetrievalService(indexer)
+    full = service.search("needle phrase", limit=2)
+    assert full
+    full_text = full[0].text
+    assert len(full_text) > 300
+    assert "needle phrase" in full_text
+
+    concise = service.search(
+        "needle phrase", limit=2, snippet_only=True, max_snippet_length=100
+    )
+    assert concise
+    result = concise[0]
+    assert result.text == result.location.snippet
+    assert len(result.text) <= 100 + 2
+    lowered = result.text.lower()
+    assert "needle" in lowered or "needle phrase" in lowered
+
+
 def test_read_allows_configured_external_source_and_rejects_unconfigured_file(
     tmp_path: Path,
 ) -> None:

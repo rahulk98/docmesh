@@ -39,6 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--approve", action="store_true")
+    parser.add_argument("--detailed", action="store_true")
     parser.add_argument("--runtime", default=None)
     parser.add_argument("--plugin-root", default=None)
     parser.add_argument("--refresh", action="store_true")
@@ -51,6 +52,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--paths", nargs="*", default=None)
     parser.add_argument("--query", default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--snippet-only", action="store_true")
+    parser.add_argument("--max-snippet-length", type=int, default=None)
     parser.add_argument("--pattern", default=None)
     parser.add_argument("--mode", default=None)
     parser.add_argument("--cursor", default=None)
@@ -110,6 +113,8 @@ def _setup_arguments(
     """Forward explicit setup/model choices without performing setup locally."""
 
     values: dict[str, Any] = {"approve": approve, "dry_run": dry_run}
+    if bool(getattr(args, "detailed", False)):
+        values["summary"] = False
     for name in ("model", "cache_dir", "db_path"):
         value = getattr(args, name, None)
         if value is not None:

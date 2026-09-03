@@ -11,6 +11,9 @@ silently make the result stale. Use `scripts/docmesh search`, `find`, and
 `read`, or the equivalent MCP tools.
 
 - `search(query, limit=8)` is precision-oriented and returns ranked evidence.
+  Results carry concise match-centered snippets by default (≤200 chars); the
+  `search` MCP tool defaults to snippets, and you can request full chunk text
+  with `snippet_only: false` or tune `max_snippet_length`.
 - `find(pattern, mode="literal"|"regex")` exhaustively enumerates occurrences;
   consume every cursor page for a complete answer.
 - `read(path, start_line, end_line, page)` reads a current source location and

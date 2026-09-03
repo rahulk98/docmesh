@@ -151,14 +151,17 @@ def tool_definitions() -> list[dict[str, Any]]:
     definitions = [
         (
             "setup",
-            "Show or apply explicit DocMesh setup; use --dry-run before approval.",
+            "Show or apply explicit DocMesh setup; use --dry-run before approval. Results summarize counts and list samples by default; pass summary:false for the full file list.",
         ),
         ("init", "Discover and initialize the DocMesh corpus after explicit approval."),
         ("index", "Index the project or supplied changed paths."),
         ("status", "Show index, queue, model, generation, and verification status."),
         ("doctor", "Diagnose DocMesh setup, dependencies, and runtime capabilities."),
         ("probe-hooks", "Probe and cache runtime/trust hook capabilities offline."),
-        ("search", "Precision-oriented hybrid search over indexed evidence."),
+        (
+            "search",
+            "Precision-oriented hybrid search over indexed evidence. Returns concise match-centered snippets by default; pass snippet_only:false plus limit for full chunk text, or set max_snippet_length.",
+        ),
         ("find", "Exhaustively enumerate literal or regex occurrences."),
         ("read", "Read a current source location or PDF page."),
         ("impact_start", "Start a recall-first discovery or verification run."),
@@ -204,6 +207,10 @@ def _tool_call(name: str, arguments: Mapping[str, Any]) -> tuple[bool, dict[str,
             freshness = run_once(root)
     request = dict(arguments)
     request["project_root"] = str(root)
+    if operation == "search" and "snippet_only" not in request:
+        # Full chunk text is available on demand; keep the default tool result
+        # cheap enough for an LLM context window.
+        request["snippet_only"] = True
     result = core_call(operation, request, project=root)
     record_core_result(root, operation, result)
     if freshness and freshness.get("status") not in {

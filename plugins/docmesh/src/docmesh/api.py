@@ -60,17 +60,26 @@ def setup(
     *,
     approve: bool = False,
     dry_run: bool = False,
+    summary: bool = True,
+    included_samples: int = 500,
+    excluded_samples: int = 200,
     **kwargs: Any,
 ) -> Mapping[str, Any]:
     if dry_run:
-        return discover_corpus(project_root).to_dict()
-    return initialize_project(
-        project_root,
-        approve=approve,
-        model=str(kwargs.get("model", DEFAULT_MODEL)),
-        cache_dir=kwargs.get("cache_dir"),
-        download_model=kwargs.get("download_model"),
-    ).to_dict()
+        report = discover_corpus(project_root)
+    else:
+        report = initialize_project(
+            project_root,
+            approve=approve,
+            model=str(kwargs.get("model", DEFAULT_MODEL)),
+            cache_dir=kwargs.get("cache_dir"),
+            download_model=kwargs.get("download_model"),
+        )
+    if summary:
+        return report.summary_dict(
+            included_samples=included_samples, excluded_samples=excluded_samples
+        )
+    return report.to_dict()
 
 
 def init(
@@ -78,9 +87,10 @@ def init(
     *,
     approve: bool = False,
     dry_run: bool = False,
+    summary: bool = True,
     **kwargs: Any,
 ) -> Mapping[str, Any]:
-    return setup(project_root, approve=approve, dry_run=dry_run, **kwargs)
+    return setup(project_root, approve=approve, dry_run=dry_run, summary=summary, **kwargs)
 
 
 def index(
@@ -179,10 +189,15 @@ def search(
         embedder=_embedder_from_arguments(kwargs),
     )
     try:
+        max_snippet_length = kwargs.get("max_snippet_length")
         return RetrievalService(worker).search(
             query,
             int(limit),
             source_roles=kwargs.get("source_roles") or kwargs.get("roles"),
+            snippet_only=bool(kwargs.get("snippet_only", False)),
+            max_snippet_length=(
+                int(max_snippet_length) if max_snippet_length is not None else 200
+            ),
         )
     finally:
         worker.store.close()

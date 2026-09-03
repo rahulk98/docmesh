@@ -30,7 +30,9 @@ passage asks for it.
 ## Workflow
 
 1. Run `setup.sh --dry-run` and review the proposed roots, roles, generated
-   mirrors, estimated setup cost, and exclusions.
+   mirrors, estimated setup cost, and exclusions. The report summarizes counts
+   by role/format/reason with sample lists; pass `--detailed` (or
+   `summary: false` on the MCP tool) when the full file list is needed.
 2. After approval, run `setup.sh --approve` (model/dependency installation is
    still explicit) and then `index.sh`.
 3. Run `scripts/docmesh status` and `scripts/docmesh doctor` and report index,

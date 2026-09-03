@@ -48,6 +48,33 @@ def _bounded(value: str, limit: int = 600) -> str:
     return value[:limit]
 
 
+def _centered_snippet(text: str, query: str, max_length: int = 200) -> str:
+    """A bounded snippet centered on the earliest query-term match.
+
+    Lexical hits carry an obvious anchor; vector-only hits fall back to the
+    start of the chunk.  The result is at most ``max_length`` characters and
+    keeps source text source-faithful (no summarization).
+    """
+
+    limit = max(1, int(max_length))
+    if len(text) <= limit:
+        return text
+    lowered = text.lower()
+    positions: list[int] = []
+    for token in re.findall(r"[^\W_]+", query.lower()):
+        if len(token) < 2:
+            continue
+        found = lowered.find(token)
+        if found >= 0:
+            positions.append(found)
+    center = min(positions) if positions else 0
+    start = max(0, min(center, len(text) - limit))
+    end = start + limit
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
 def _line_for_offset(text: str, offset: int) -> int:
     return text.count("\n", 0, max(0, offset)) + 1
 
@@ -231,6 +258,8 @@ class RetrievalService:
         *,
         source_roles: Sequence[str] | None = None,
         roles: Sequence[str] | None = None,
+        snippet_only: bool = False,
+        max_snippet_length: int = 200,
     ) -> list[SearchResult]:
         self._reconcile_freshness()
         role_filter = set(source_roles or roles or ())
@@ -312,10 +341,14 @@ class RetrievalService:
         for score, item in ranked[: max(0, int(limit))]:
             row = item["row"]
             location = self._location_for_chunk_row(row)
+            snippet = _centered_snippet(
+                str(row["text"]), query, max_snippet_length
+            )
+            location.snippet = snippet
             results.append(
                 SearchResult(
                     location,
-                    str(row["text"]),
+                    snippet if snippet_only else str(row["text"]),
                     score,
                     item["lexical_score"],
                     item["vector_score"],

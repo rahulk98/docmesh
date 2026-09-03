@@ -152,6 +152,63 @@ class DiscoveryReport:
             "estimated_setup_cost": self.estimated_setup_cost,
         }
 
+    def summary_dict(
+        self,
+        *,
+        included_samples: int = 500,
+        excluded_samples: int = 200,
+    ) -> dict[str, Any]:
+        """A bounded report for callers that only need the plan.
+
+        Counts by role/format (included) and by reason (excluded) summarize
+        the full corpus while sample lists stay small enough for CLI/MCP tool
+        results.  Pass ``summary=False`` to the setup API for the complete,
+        unbounded ``to_dict()`` shape.
+        """
+
+        included_samples = max(0, int(included_samples))
+        excluded_samples = max(0, int(excluded_samples))
+        included_by_role: dict[str, int] = {}
+        included_by_format: dict[str, int] = {}
+        for item in self.included:
+            included_by_role[item.role] = included_by_role.get(item.role, 0) + 1
+            included_by_format[item.format] = included_by_format.get(
+                item.format, 0
+            ) + 1
+        excluded_by_reason: dict[str, int] = {}
+        for item in self.excluded:
+            excluded_by_reason[item.reason] = excluded_by_reason.get(
+                item.reason, 0
+            ) + 1
+        return {
+            "root": self.root,
+            "summary": {
+                "included": {
+                    "total": len(self.included),
+                    "by_role": included_by_role,
+                    "by_format": included_by_format,
+                    "estimated_bytes": self.estimated_bytes,
+                    "sampled": min(included_samples, len(self.included)),
+                    "includes_all": len(self.included) <= included_samples,
+                },
+                "excluded": {
+                    "total": len(self.excluded),
+                    "by_reason": excluded_by_reason,
+                    "sampled": min(excluded_samples, len(self.excluded)),
+                    "includes_all": len(self.excluded) <= excluded_samples,
+                },
+            },
+            "included": [item.to_dict() for item in self.included[:included_samples]],
+            "excluded": [item.to_dict() for item in self.excluded[:excluded_samples]],
+            "estimated_bytes": self.estimated_bytes,
+            "estimated_documents": self.estimated_documents,
+            "model_required": self.model_required,
+            "model_ready": self.model_ready,
+            "model_cache_dir": self.model_cache_dir,
+            "model_error": self.model_error,
+            "estimated_setup_cost": self.estimated_setup_cost,
+        }
+
 
 @dataclass
 class Section:
@@ -579,6 +636,7 @@ class IndexStatus:
     model: str = ""
     model_ready: bool = False
     model_cache_dir: str | None = None
+    skipped_documents: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

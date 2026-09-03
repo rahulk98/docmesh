@@ -6,6 +6,21 @@ AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
 ## [Unreleased]
 
+- `setup`/`init` (CLI and MCP) now return a summarized discovery report by
+  default: counts by role/format and exclusion reason, estimated size, model
+  status, and bounded sample lists instead of every file. A project with tens
+  of thousands of excluded files no longer produces a 10MB+ JSON tool result;
+  pass `--detailed` (`summary: false` on the MCP tool) for the full report.
+- The indexer now survives corrupt, truncated, or unparseable sources (for
+  example a PDF whose header or stream is broken): it warns, records the path
+  and reason in `IndexStatus.skipped_documents`, drops any stale entry for
+  that source, and keeps indexing the rest of the corpus instead of failing
+  the entire run.
+- `search` results now carry concise match-centered snippets (≤200 chars by
+  default, `max_snippet_length` to tune) and the MCP `search` tool defaults
+  to snippet-only output; the full chunk text remains one flag away
+  (`snippet_only: false`).
+
 ## [1.0.4] - 2026-09-02
 
 - Indexing memory: embeddings are now computed in bounded batches

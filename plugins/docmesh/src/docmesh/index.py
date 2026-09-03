@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
@@ -28,8 +29,17 @@ from .embeddings import (
     embed_passages,
     vector_to_blob,
 )
-from .models import Chunk, DiscoveryItem, IndexStatus, Manifest, ModelNotInstalledError
+from .models import (
+    Chunk,
+    DiscoveryItem,
+    IndexStatus,
+    Manifest,
+    ModelNotInstalledError,
+    UnsupportedDocumentError,
+)
 from .parsing import ParsedDocument, parse_file
+
+_logger = logging.getLogger("docmesh.index")
 
 SCHEMA_VERSION = "1"
 FTS_SYNC_VERSION = "1"
@@ -846,6 +856,7 @@ class Indexer:
             items = [self._configured_item(str(path)) for path in paths or ()]
         seen = set()
         chunker = self._chunker()
+        skipped: list[dict[str, str]] = []
         for item in items:
             path = canonical_path(item.path)
             seen.add(path)
@@ -865,7 +876,27 @@ class Indexer:
                 and not force
             ):
                 continue
-            parsed = self._parse_for_index(item, data=raw)
+            # A corrupt/truncated/unparseable source (a truncated PDF, say)
+            # must never abort the whole run.  Warn, drop any stale entry so
+            # retrieval cannot return outdated content, and keep indexing.
+            try:
+                parsed = self._parse_for_index(item, data=raw)
+            except (
+                UnsupportedDocumentError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+                KeyError,
+                IndexError,
+            ) as exc:
+                _logger.warning("skipping unparseable document %s: %s", path, exc)
+                reason = str(exc).strip() or type(exc).__name__
+                skipped.append({"path": path, "reason": reason})
+                if self.store.document(path):
+                    self.store.remove_document(path)
+                    changed = True
+                continue
             chunks = chunker.chunk_document(
                 parsed.path, parsed.sections, text_hash=raw_hash
             )
@@ -883,7 +914,7 @@ class Indexer:
             self.store.set_corpus_revision(self._compute_indexed_revision())
         elif not self.store.corpus_revision:
             self.store.set_corpus_revision(self._compute_indexed_revision())
-        return self.status()
+        return self.status(skipped_documents=skipped)
 
     def reindex_path(self, path: str | Path) -> IndexStatus:
         return self.index(paths=[path], force=True)
@@ -939,7 +970,9 @@ class Indexer:
             "current": current,
         }
 
-    def status(self) -> IndexStatus:
+    def status(
+        self, *, skipped_documents: Sequence[dict[str, str]] | None = None
+    ) -> IndexStatus:
         stale: list[str] = []
         hashes = self.current_file_hashes()
         for row in self.store.document_meta():
@@ -961,4 +994,5 @@ class Indexer:
                 backend_ready or is_model_ready(self.root, self.manifest.model)
             ),
             model_cache_dir=str(self.model_cache_dir),
+            skipped_documents=list(skipped_documents or []),
         )

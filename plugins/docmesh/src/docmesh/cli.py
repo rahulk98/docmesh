@@ -49,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--approve", "--yes", action="store_true")
+    parser.add_argument("--detailed", action="store_true")
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--use-fastembed", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -62,6 +63,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--paths", nargs="*", default=None)
     parser.add_argument("--query", default=None)
     parser.add_argument("--limit", type=int, default=8)
+    parser.add_argument("--snippet-only", action="store_true")
+    parser.add_argument("--max-snippet-length", type=int, default=None)
     parser.add_argument("--pattern", default=None)
     parser.add_argument("--mode", default="literal")
     parser.add_argument("--cursor", default=None)
@@ -105,13 +108,14 @@ def execute(args: argparse.Namespace) -> Any:
     if args.download_model is not None:
         common["download_model"] = args.download_model
     if operation in ("setup", "init"):
+        setup_kwargs: dict[str, Any] = {"summary": not args.detailed}
         if args.dry_run:
-            return api.setup(**common, dry_run=True)
+            return api.setup(**common, dry_run=True, **setup_kwargs)
         if not args.approve:
             raise PermissionError(
                 "explicit approval is required; rerun with --dry-run then --approve"
             )
-        return api.setup(**common, approve=True)
+        return api.setup(**common, approve=True, **setup_kwargs)
     if operation == "index":
         return api.index(**common, paths=args.paths, force=args.force)
     if operation == "status":
@@ -126,6 +130,8 @@ def execute(args: argparse.Namespace) -> Any:
             query=args.query or "",
             limit=args.limit,
             source_roles=args.source_roles,
+            snippet_only=args.snippet_only,
+            max_snippet_length=args.max_snippet_length,
         )
     if operation == "find":
         return api.find(
