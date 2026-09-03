@@ -20,7 +20,7 @@ class ManifestAndSkillTests(unittest.TestCase):
     def test_codex_manifest_declares_shared_assets(self) -> None:
         manifest = self._json(PLUGIN / ".codex-plugin" / "plugin.json")
         self.assertEqual(manifest["name"], "docmesh")
-        self.assertEqual(manifest["version"], "1.0.5")
+        self.assertEqual(manifest["version"], "1.1.0")
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertEqual(manifest["mcpServers"], "./mcp.codex.json")
         self.assertEqual(manifest["hooks"], "./hooks/codex-hooks.json")
@@ -28,7 +28,7 @@ class ManifestAndSkillTests(unittest.TestCase):
     def test_claude_manifest_and_hook_file_exist(self) -> None:
         manifest = self._json(PLUGIN / ".claude-plugin" / "plugin.json")
         self.assertEqual(manifest["name"], "docmesh")
-        self.assertEqual(manifest["version"], "1.0.5")
+        self.assertEqual(manifest["version"], "1.1.0")
         hooks = self._json(PLUGIN / "hooks" / "hooks.json")
         self.assertIn("PostToolUse", hooks["hooks"])
         self.assertIn("Stop", hooks["hooks"])
@@ -72,11 +72,12 @@ class ManifestAndSkillTests(unittest.TestCase):
         personal = self._json(ROOT / ".agents" / "plugins" / "marketplace.json")
         self.assertEqual(personal["plugins"][0]["source"]["path"], "./plugins/docmesh")
 
-    def test_all_three_skills_are_present_and_untrusted_content_safe(self) -> None:
+    def test_all_skills_are_present_and_untrusted_content_safe(self) -> None:
         names = {
             "docmesh-init": "corpus",
             "docmesh-search": "search",
             "docmesh-global-edit": "impact",
+            "docmesh-latex-check": "label",
         }
         for name, required_word in names.items():
             path = PLUGIN / "skills" / name / "SKILL.md"

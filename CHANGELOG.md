@@ -4,6 +4,30 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
+## [1.1.0] - 2026-09-03
+
+- Every MCP tool result is now bounded by a total output budget (16000 chars
+  by default, `DOCMESH_MAX_RESULT_CHARS` to tune). Oversized results trim
+  trailing list entries first, then over-long strings, and carry explicit
+  `truncated`/`omitted` markers instead of flooding the caller's context.
+- MCP results report paths relative to the project root (the root itself is
+  included once as `project_root`).
+- `search` collapses results from the same file with overlapping line ranges,
+  keeping the higher-ranked one and backfilling further candidates.
+- `doctor` detects a stale MCP server: it compares the running server version
+  against the newest installed plugin version in the Claude/Codex plugin
+  caches and advises a restart when the server is older.
+- New `docmesh bench --queries <file>` CLI command: runs a JSON query set
+  against the index and reports mean reciprocal rank, recall@8, and per-query
+  hit ranks for retrieval tuning.
+- New `docmesh-latex-check` skill: LaTeX/BibTeX consistency recipes (dangling
+  `\ref`s, unused labels, undefined or uncited citation keys, duplicate
+  labels and bib keys) driven by `find` regex enumeration.
+- Rewrote the `impact_*` tool and `docmesh-global-edit` skill descriptions in
+  plain task language ("batch edit that can't miss a spot") and added a
+  redirect from `search` to `impact_start` for multi-location edits, so
+  agents actually reach for the exhaustive workflow when it applies.
+
 ## [1.0.5] - 2026-09-03
 
 - `search`/`find`/`read` locations no longer emit the legacy alias keys

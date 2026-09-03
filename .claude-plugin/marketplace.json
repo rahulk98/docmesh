@@ -3,7 +3,7 @@
   "name": "docmesh",
   "metadata": {
     "description": "Offline-capable, recall-first document retrieval and consistency workflows for coding agents.",
-    "version": "1.0.5"
+    "version": "1.1.0"
   },
   "owner": {
     "name": "DocMesh contributors",

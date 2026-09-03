@@ -338,9 +338,21 @@ class RetrievalService:
             )
         )
         results: list[SearchResult] = []
-        for score, item in ranked[: max(0, int(limit))]:
+        seen_spans: list[tuple[str, int, int]] = []
+        target = max(0, int(limit))
+        for score, item in ranked:
+            if len(results) >= target:
+                break
             row = item["row"]
             location = self._location_for_chunk_row(row)
+            if location.start_line is not None and location.end_line is not None:
+                span = (location.path, location.start_line, location.end_line)
+                if any(
+                    span[0] == other[0] and span[1] <= other[2] and other[1] <= span[2]
+                    for other in seen_spans
+                ):
+                    continue
+                seen_spans.append(span)
             snippet = _centered_snippet(
                 str(row["text"]), query, max_snippet_length
             )

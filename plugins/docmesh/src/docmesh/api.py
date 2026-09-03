@@ -18,7 +18,7 @@ from .config import (
 from .embeddings import DeterministicEmbedder, FastEmbedBackend
 from .impact import ImpactEngine
 from .index import Indexer
-from .models import ImpactQueryBundle
+from .models import ImpactQueryBundle, SearchMetrics
 from .retrieval import RetrievalService
 
 
@@ -199,6 +199,54 @@ def search(
                 int(max_snippet_length) if max_snippet_length is not None else 200
             ),
         )
+    finally:
+        worker.store.close()
+
+
+def bench(
+    project_root: str | Path = ".",
+    queries: Sequence[Mapping[str, Any]] = (),
+    **kwargs: Any,
+) -> Mapping[str, Any]:
+    worker = _indexer(
+        project_root,
+        db_path=kwargs.get("db_path"),
+        embedder=_embedder_from_arguments(kwargs),
+    )
+    try:
+        service = RetrievalService(worker)
+        reciprocal = 0.0
+        recalled = 0
+        result_count = 0
+        per_query: list[dict[str, Any]] = []
+        for item in queries:
+            query = str(item.get("query", ""))
+            expect_path = item.get("expect_path_contains")
+            expect_text = item.get("expect_text_contains")
+            found = service.search(query, 8)
+            result_count += len(found)
+            hit_rank: int | None = None
+            for rank, result in enumerate(found, start=1):
+                if expect_path and expect_path not in result.location.path:
+                    continue
+                if expect_text and expect_text not in result.text:
+                    continue
+                hit_rank = rank
+                break
+            if hit_rank is not None:
+                reciprocal += 1.0 / hit_rank
+                recalled += 1
+            per_query.append({"query": query, "hit_rank": hit_rank})
+        total = float(len(queries)) if queries else 1.0
+        metrics = SearchMetrics(
+            reciprocal / total,
+            recalled / total,
+            len(queries),
+            result_count,
+        )
+        payload = metrics.to_dict()
+        payload["per_query"] = per_query
+        return payload
     finally:
         worker.store.close()
 

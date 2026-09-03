@@ -103,7 +103,7 @@ Additional scripts:
 
 ## Skills
 
-The plugin ships three skills that define the workflows:
+The plugin ships four skills that define the workflows:
 
 - **`docmesh-init`** — corpus discovery, source-role assignment, explicit model
   setup, indexing, and diagnostics.
@@ -115,6 +115,9 @@ The plugin ships three skills that define the workflows:
   rewrites, removals, and consistency passes. Even when the request points at
   one paragraph, it runs global discovery first, because the same idea may
   appear in differently worded locations.
+- **`docmesh-latex-check`** - LaTeX/BibTeX consistency: dangling refs, unused
+  labels, undefined or uncited citation keys, and duplicate labels/bib keys,
+  via `find` regex enumeration and set comparison.
 
 The global-edit workflow:
 

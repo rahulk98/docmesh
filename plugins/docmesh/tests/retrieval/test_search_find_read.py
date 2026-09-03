@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from docmesh import api
 from docmesh.embeddings import DeterministicEmbedder
 from docmesh.index import Indexer, SQLiteIndex
 from docmesh.models import Manifest, SourceConfig, ValidationError
@@ -76,6 +77,91 @@ def test_search_snippets_are_concise_and_centered_on_the_match(
     assert len(result.text) <= 100 + 2
     lowered = result.text.lower()
     assert "needle" in lowered or "needle phrase" in lowered
+
+
+def test_search_collapses_overlapping_chunks_for_the_same_path(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "guide.md").write_text(
+        "# Guide\n"
+        + "\n".join(f"policy statement number {i}" for i in range(1, 5)),
+        encoding="utf-8",
+    )
+    indexer = Indexer(
+        tmp_path, index=SQLiteIndex(":memory:"), embedder=DeterministicEmbedder(32)
+    )
+    indexer.index()
+    store = indexer.store
+    row = store.conn.execute("SELECT * FROM chunks LIMIT 1").fetchone()
+    # Simulate a second chunk that overlaps the same source lines (e.g. from a
+    # re-chunk boundary shift); the ranker must not surface both.
+    cursor = store.conn.execute(
+        "INSERT INTO chunks(document_path,ordinal,breadcrumb,text,start_line,end_line,"
+        "page,token_count,embedding_input,text_hash,embedding_strategy_id) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            row["document_path"],
+            row["ordinal"] + 1000,
+            row["breadcrumb"],
+            row["text"],
+            row["start_line"],
+            row["end_line"],
+            row["page"],
+            row["token_count"],
+            row["embedding_input"],
+            row["text_hash"],
+            row["embedding_strategy_id"],
+        ),
+    )
+    new_id = cursor.lastrowid
+    store.conn.execute(
+        "INSERT INTO chunks_fts(rowid,breadcrumb,text) VALUES(?,?,?)",
+        (new_id, row["breadcrumb"], row["text"]),
+    )
+    vector_row = store.conn.execute(
+        "SELECT vector, dimensions FROM vectors WHERE chunk_id=?", (row["id"],)
+    ).fetchone()
+    store.conn.execute(
+        "INSERT INTO vectors(chunk_id,dimensions,vector) VALUES(?,?,?)",
+        (new_id, vector_row["dimensions"], vector_row["vector"]),
+    )
+    store.conn.commit()
+
+    service = RetrievalService(indexer)
+    results = service.search("policy statement", limit=8)
+    spans = [
+        (result.location.path, result.location.start_line, result.location.end_line)
+        for result in results
+    ]
+    assert len(spans) == len(set(spans))
+
+
+def test_bench_reports_mean_reciprocal_rank_and_recall_at_8(tmp_path: Path) -> None:
+    (tmp_path / "guide.md").write_text(
+        "# Guide\nThe canonical policy applies.\n", encoding="utf-8"
+    )
+    (tmp_path / "other.md").write_text(
+        "# Other\nUnrelated shipping schedule notes.\n", encoding="utf-8"
+    )
+    queries = [
+        {"query": "canonical policy", "expect_path_contains": "guide.md"},
+        {"query": "shipping schedule", "expect_path_contains": "other.md"},
+        {"query": "nonexistent topic entirely", "expect_path_contains": "missing.md"},
+    ]
+    result = api.bench(
+        project_root=tmp_path,
+        queries=queries,
+        deterministic=True,
+        dimensions=32,
+        db_path=str(tmp_path / "index.sqlite3"),
+    )
+    assert result["queries"] == 3
+    assert result["recall_at_8"] == 2 / 3
+    assert result["mean_reciprocal_rank"] > 0.0
+    hit_ranks = [item["hit_rank"] for item in result["per_query"]]
+    assert hit_ranks[0] == 1
+    assert hit_ranks[1] == 1
+    assert hit_ranks[2] is None
 
 
 def test_read_allows_configured_external_source_and_rejects_unconfigured_file(

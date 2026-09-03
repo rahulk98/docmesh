@@ -1,6 +1,6 @@
 ---
 name: docmesh-global-edit
-description: Make a conceptual documentation change with recall-first discovery, classification, source-validated edits, reindexing, and immutable-baseline verification.
+description: Use for any batch or multi-location edit (apply/fix/update/consolidate/remove N items, terms, TODOs, or claims across a document set) that must land consistently everywhere it occurs - finds every occurrence first, edits, then verifies nothing was missed.
 ---
 
 # DocMesh global edit

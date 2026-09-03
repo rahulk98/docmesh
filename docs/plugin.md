@@ -2,7 +2,7 @@
 
 The shared package lives at `plugins/docmesh/` and contains Codex and Claude
 manifests, runtime-specific MCP configuration for one shared stdio server,
-three workflow skills, and harness scripts.
+four workflow skills, and harness scripts.
 Both runtimes point at the same skill files and the same core public
 operations. Skills are intentionally kept inside the plugin so uninstalling it
 does not mutate a global or project skill directory.

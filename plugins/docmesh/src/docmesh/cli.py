@@ -32,6 +32,7 @@ def _parser() -> argparse.ArgumentParser:
             "search",
             "find",
             "read",
+            "bench",
             "impact-start",
             "impact_start",
             "impact-page",
@@ -81,6 +82,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-id", default=None)
     parser.add_argument("--context-lines", type=int, default=20)
     parser.add_argument("--decisions", default=None)
+    parser.add_argument("--queries", default=None)
     return parser
 
 
@@ -133,6 +135,11 @@ def execute(args: argparse.Namespace) -> Any:
             snippet_only=args.snippet_only,
             max_snippet_length=args.max_snippet_length,
         )
+    if operation == "bench":
+        if not args.queries:
+            raise ValueError("--queries is required for bench")
+        queries = json.loads(Path(args.queries).read_text(encoding="utf-8"))
+        return api.bench(**common, queries=queries)
     if operation == "find":
         return api.find(
             **common,
