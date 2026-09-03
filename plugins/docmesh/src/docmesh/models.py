@@ -300,13 +300,12 @@ class SourceLocation:
         return self.snippet
 
     def to_dict(self) -> dict[str, Any]:
-        """Return actionable V1 keys and retain the V1-internal aliases.
+        """Return actionable V1 keys only.
 
         The public wire shape names the path/breadcrumb/content explicitly so
         callers cannot confuse a source span hash with a document revision.
-        Older callers used the shorter dataclass field names; keeping those
-        aliases here makes persisted runs forward-compatible without changing
-        the actionable fields.
+        Only canonical keys are written; location_from_mapping still accepts
+        the older persisted aliases when reading.
         """
 
         from pathlib import Path
@@ -318,20 +317,13 @@ class SourceLocation:
         if self.format == "pdf" or self.page is not None:
             value: dict[str, Any] = {
                 "canonical_path": canonical,
+                "section_breadcrumb": self.breadcrumb,
                 "page_number": self.page,
+                "content_hash": self.span_hash,
                 "current_file_hash": self.file_hash,
                 "bounded_passage": bounded,
                 "role": self.role,
                 "format": "pdf" if self.format == "text" else self.format,
-                # Legacy names used by the first V1 implementation.
-                "path": canonical,
-                "breadcrumb": self.breadcrumb,
-                "page": self.page,
-                "span_hash": self.span_hash,
-                "source_span_hash": self.span_hash,
-                "file_hash": self.file_hash,
-                "revision_hash": self.file_hash,
-                "snippet": bounded,
             }
             return value
         value = {
@@ -344,15 +336,6 @@ class SourceLocation:
             "source_snippet": bounded,
             "role": self.role,
             "format": self.format,
-            # Legacy names used by the first V1 implementation.
-            "path": canonical,
-            "breadcrumb": self.breadcrumb,
-            "page": self.page,
-            "span_hash": self.span_hash,
-            "source_span_hash": self.span_hash,
-            "file_hash": self.file_hash,
-            "revision_hash": self.file_hash,
-            "snippet": bounded,
         }
         return value
 
@@ -376,6 +359,9 @@ class SearchResult:
         value = asdict(self)
         value["channels"] = list(self.channels)
         value["location"] = self.location.to_dict()
+        for key in ("source_snippet", "bounded_passage"):
+            if value["location"].get(key) == self.text:
+                value["location"].pop(key)
         return value
 
 

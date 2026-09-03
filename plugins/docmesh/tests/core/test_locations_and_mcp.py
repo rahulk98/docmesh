@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from docmesh.mcp import sanitize_result
-from docmesh.models import SourceLocation, location_from_mapping
+from docmesh.models import SearchResult, SourceLocation, location_from_mapping
 
 
-def test_source_location_serializes_exact_actionable_keys_and_legacy_aliases() -> None:
+def test_source_location_serializes_exact_actionable_keys() -> None:
     text = SourceLocation(
         "/tmp/guide.md",
         "Guide > Limits",
@@ -25,6 +25,8 @@ def test_source_location_serializes_exact_actionable_keys_and_legacy_aliases() -
     assert payload["end_line"] == 6
     assert payload["content_hash"] == "span-hash"
     assert payload["source_snippet"] == "bounded source"
+    for key in ("path", "snippet", "span_hash", "revision_hash", "source_span_hash", "file_hash", "breadcrumb", "page"):
+        assert key not in payload
 
     loaded = location_from_mapping(payload)
     assert loaded.path == str(Path(text.path).resolve())
@@ -45,6 +47,12 @@ def test_source_location_serializes_exact_actionable_keys_and_legacy_aliases() -
     assert pdf["canonical_path"] == str(Path("/tmp/paper.pdf").resolve())
     assert pdf["page_number"] == 2
     assert pdf["bounded_passage"] == "bounded passage"
+    assert pdf["content_hash"] == "page-hash"
+    pdf_loaded = location_from_mapping(pdf)
+    assert pdf_loaded.span_hash == "page-hash"
+    assert pdf_loaded.breadcrumb == "Page 2"
+    for key in ("path", "snippet", "span_hash", "revision_hash", "source_span_hash", "file_hash", "breadcrumb", "page"):
+        assert key not in pdf
     assert (
         location_from_mapping(
             {
@@ -60,6 +68,24 @@ def test_source_location_serializes_exact_actionable_keys_and_legacy_aliases() -
         ).page
         == 2
     )
+
+
+def test_search_result_does_not_repeat_identical_snippet_in_text_and_location() -> None:
+    location = SourceLocation(
+        "/tmp/guide.md",
+        "Guide > Limits",
+        start_line=4,
+        end_line=6,
+        span_hash="span-hash",
+        file_hash="file-hash",
+        snippet="same text",
+        role="editable",
+        format="markdown",
+    )
+    result = SearchResult(location=location, text="same text", score=1.0)
+    payload = result.to_dict()
+    assert payload["text"] == "same text"
+    assert "source_snippet" not in payload["location"]
 
 
 def test_core_mcp_sanitizes_nested_document_content_into_untrusted_field() -> None:

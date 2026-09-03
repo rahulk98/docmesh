@@ -4,8 +4,15 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
-## [Unreleased]
+## [1.0.5] - 2026-09-03
 
+- `search`/`find`/`read` locations no longer emit the legacy alias keys
+  (`path`, `breadcrumb`, `page`, `span_hash`, `source_span_hash`,
+  `file_hash`, `revision_hash`, `snippet`) alongside the canonical ones;
+  this roughly halves per-result wire size. Readers still accept the older
+  persisted shapes.
+- `search` results no longer repeat the snippet text in both `text` and
+  `location` when they're identical.
 - `setup`/`init` (CLI and MCP) now return a summarized discovery report by
   default: counts by role/format and exclusion reason, estimated size, model
   status, and bounded sample lists instead of every file. A project with tens
