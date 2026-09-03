@@ -76,6 +76,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase", default="discover")
     parser.add_argument("--query-bundle", default=None)
     parser.add_argument("--source-roles", nargs="*", default=None)
+    parser.add_argument("--scope", default=None)
     parser.add_argument("--page-size", type=int, default=20)
     parser.add_argument("--baseline-run-id", default=None)
     parser.add_argument("--run-id", default=None)
@@ -147,6 +148,7 @@ def execute(args: argparse.Namespace) -> Any:
             mode=args.mode,
             cursor=args.cursor,
             source_roles=args.source_roles,
+            scope=args.scope,
         )
     if operation == "read":
         return api.read(

@@ -269,6 +269,7 @@ def find(
             mode,
             cursor,
             source_roles=kwargs.get("source_roles") or kwargs.get("roles"),
+            scope=kwargs.get("scope"),
         )
     finally:
         worker.store.close()

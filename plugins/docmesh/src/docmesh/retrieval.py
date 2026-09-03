@@ -23,7 +23,7 @@ from .models import (
     UnsupportedDocumentError,
     ValidationError,
 )
-from .parsing import parse_file, span_text
+from .parsing import line_at, parse_file, span_text
 
 RRF_K = 60
 DEFAULT_RESULT_LIMIT = 8
@@ -81,6 +81,16 @@ def _line_for_offset(text: str, offset: int) -> int:
 
 def _span_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _pdf_match_fields(page_text: str, match: re.Match[str]) -> tuple[str, str, int, int]:
+    """(matched line, match-centered snippet, start column, end column) for a PDF match."""
+
+    matched_line = line_at(page_text, _line_for_offset(page_text, match.start()))
+    snippet = _bounded(page_text[max(0, match.start() - 100) : match.end() + 100])
+    start_column = match.start() - page_text.rfind("\n", 0, match.start())
+    end_column = match.end() - page_text.rfind("\n", 0, match.end())
+    return _bounded(matched_line), snippet, start_column, end_column
 
 
 def _row_mapping(row: RowLike) -> dict[str, Any]:
@@ -379,6 +389,7 @@ class RetrievalService:
         *,
         source_roles: Sequence[str] | None = None,
         roles: Sequence[str] | None = None,
+        scope: str | None = None,
     ) -> list[FindResult]:
         self._reconcile_freshness()
         if mode not in ("literal", "regex"):
@@ -389,11 +400,18 @@ class RetrievalService:
             re.escape(pattern) if mode == "literal" else pattern, re.MULTILINE
         )
         role_filter = set(source_roles or roles or ())
+        scope_prefix = (
+            canonical_path(scope, base=self.indexer.root) if scope else None
+        )
         results: list[FindResult] = []
         for row in self.store.documents():
             if role_filter and row["role"] not in role_filter:
                 continue
             path = row["path"]
+            if scope_prefix and path != scope_prefix and not path.startswith(
+                scope_prefix + "/"
+            ):
+                continue
             if row["format"] == "pdf":
                 try:
                     parsed = parse_file(path)
@@ -410,6 +428,9 @@ class RetrievalService:
                     pages = []
                 for page_number, page_text in enumerate(pages, start=1):
                     for match in expression.finditer(page_text):
+                        line_text, snippet, start_col, end_col = _pdf_match_fields(
+                            page_text, match
+                        )
                         results.append(
                             FindResult(
                                 SourceLocation(
@@ -418,14 +439,14 @@ class RetrievalService:
                                     page=page_number,
                                     span_hash=_span_hash(page_text),
                                     file_hash=row["file_hash"],
-                                    snippet=_bounded(page_text),
+                                    snippet=snippet,
                                     role=row["role"],
                                     format="pdf",
                                 ),
                                 match.group(0),
-                                page_text,
-                                match.start() + 1,
-                                match.end() + 1,
+                                line_text,
+                                start_col,
+                                end_col,
                             )
                         )
                 continue

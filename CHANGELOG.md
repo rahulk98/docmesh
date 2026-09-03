@@ -4,6 +4,15 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
+## [1.1.1] - 2026-09-03
+
+- `find` no longer returns the entire page text for every PDF match; each
+  match now carries only the matched line and a match-centered snippet,
+  cutting worst-case output from ~1MB to a few hundred bytes per match (#6).
+- `find` accepts a `scope` path prefix (relative or absolute, directory
+  boundaries respected) to restrict enumeration to a subtree; previously the
+  argument was silently ignored. Also exposed as `--scope` on the CLI.
+
 ## [1.1.0] - 2026-09-03
 
 - Every MCP tool result is now bounded by a total output budget (16000 chars

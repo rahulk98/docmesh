@@ -35,7 +35,7 @@ from harness import (
 )
 from worker import run_once
 
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.1.1"
 PLUGIN_CACHE_GLOBS = (
     str(Path.home() / ".claude" / "plugins" / "cache" / "docmesh" / "docmesh" / "*"),
     str(Path.home() / ".codex" / "plugins" / "cache" / "docmesh" / "docmesh" / "*"),
@@ -261,7 +261,10 @@ def tool_definitions() -> list[dict[str, Any]]:
             "search",
             "Precision-oriented hybrid search over indexed evidence. Returns concise match-centered snippets by default; pass snippet_only:false plus limit for full chunk text, or set max_snippet_length. For editing the same term/claim/TODO in more than one place, use impact_start instead - search alone won't guarantee full coverage.",
         ),
-        ("find", "Exhaustively enumerate literal or regex occurrences."),
+        (
+            "find",
+            'Exhaustively enumerate literal or regex occurrences. Returns file/line locations with the matched line only; pass scope:"<path-prefix>" to restrict to a subtree, cursor:<n> to continue a long listing.',
+        ),
         ("read", "Read a current source location or PDF page."),
         (
             "impact_start",
