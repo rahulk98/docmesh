@@ -106,7 +106,11 @@ def test_search_collapses_overlapping_chunks_for_the_same_path(
 ) -> None:
     (tmp_path / "guide.md").write_text(
         "# Guide\n"
-        + "\n".join(f"policy statement number {i}" for i in range(1, 5)),
+        + "\n".join(
+            f"The quarterly compliance review process thoroughly covers"
+            f" policy item number {i} for the operations team in detail"
+            for i in range(1, 5)
+        ),
         encoding="utf-8",
     )
     indexer = Indexer(

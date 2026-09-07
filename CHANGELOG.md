@@ -4,7 +4,25 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
-## [Unreleased]
+## [1.3.0] - 2026-09-07
+
+- `read`/`find` resolve a `--path`/`--scope` argument like `grep` would:
+  absolute as given, else relative to the caller's cwd if that exists inside
+  the project root, else relative to the project root; the MCP server has no
+  meaningful invoking cwd, so it stays absolute-then-root-relative.
+- `status`/`index` now report `documents` (source documents; a PDF's
+  generated mirror is not one) and a separate `mirrors` count, instead of one
+  total that double-counted each PDF and its mirror.
+- The low-signal vector filter (now `low-signal-vector-filter-v2`) requires
+  at least 6 distinct alphabetic words of length 3+, caps numeric tokens at
+  half the chunk's tokens, and treats a whole document under 40 words as
+  figure-like so none of its chunks get vectors even if a chunk-level check
+  would let one slip through. Vectors rebuild on the next index; chunks stay
+  searchable via FTS in the meantime.
+- PDF reader objects from pypdf are explicitly garbage-collected after each
+  file is mirrored; the parsed pages/fonts/XObjects formed reference cycles
+  that kept the whole reader alive across a multi-PDF indexing run, driving
+  peak RSS from 386 MB to 113 MB per file in isolation.
 
 - Impact candidates reloaded through `impact_page`/`impact_read` keep their
   `match_kind` and `matched_terms` instead of collapsing to `semantic_only`;

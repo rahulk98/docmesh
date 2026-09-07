@@ -251,3 +251,29 @@ def test_pdf_chunks_carry_mirror_path_generated_from_page_and_lines(
     mirror_row = indexer.store.mirror_for(str(tmp_path / "paper.pdf"))
     assert mirror_row is not None
     assert indexer.store.chunks(str(mirror_row["path"]))
+
+
+def test_status_reports_documents_and_mirrors_separately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PDF's mirror is a generated row, not a second source document."""
+
+    from docmesh import api
+    from docmesh.config import manifest_to_toml
+    from docmesh.models import Manifest
+
+    (tmp_path / "notes.md").write_text("# Notes\nSome text.", encoding="utf-8")
+    (tmp_path / "paper.pdf").write_bytes(b"%PDF-1.4 stub")
+    _patch_multipage_pdf(monkeypatch, ["Only page text."])
+    (tmp_path / ".docmesh").mkdir()
+    (tmp_path / ".docmesh" / "manifest.toml").write_text(
+        manifest_to_toml(Manifest(str(tmp_path))), encoding="utf-8"
+    )
+
+    index_result = api.index(tmp_path, deterministic=True)
+    assert index_result["documents"] == 2
+    assert index_result["mirrors"] == 1
+
+    status_result = api.status(tmp_path)
+    assert status_result["documents"] == 2
+    assert status_result["mirrors"] == 1

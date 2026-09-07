@@ -45,6 +45,40 @@ class _RankedChunk(TypedDict):
     rrf_score: float
 
 
+def resolve_source_path(
+    value: str, root: Path, cwd: str | Path | None = None
+) -> str:
+    """Resolve a ``--path``/``--scope`` argument the way ``grep`` would.
+
+    Order: absolute as given; relative to the invoking ``cwd`` if that exists
+    inside the project root; else relative to the project root.  ``cwd`` is
+    ``None`` for callers with no meaningful invoking directory (the MCP
+    server), which collapses the order to absolute-then-root-relative.
+    """
+
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        # An absolute path may deliberately name a configured source outside
+        # the project root (docs/design.md); only relative resolution is
+        # bounded to the root.
+        return str(candidate.resolve(strict=False))
+    resolved = None
+    if cwd is not None:
+        attempt = (Path(cwd) / candidate).resolve(strict=False)
+        if attempt.exists():
+            resolved = attempt
+    if resolved is None:
+        resolved = (root / candidate).resolve(strict=False)
+    if resolved != root:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValidationError(
+                f"path resolves outside the project root: {value}"
+            ) from None
+    return str(resolved)
+
+
 def _bounded(value: str, limit: int = 600) -> str:
     if len(value) <= limit:
         return value
@@ -457,6 +491,7 @@ class RetrievalService:
         source_roles: Sequence[str] | None = None,
         roles: Sequence[str] | None = None,
         scope: str | None = None,
+        cwd: str | Path | None = None,
     ) -> list[FindResult]:
         self._reconcile_freshness()
         if mode not in ("literal", "regex"):
@@ -471,7 +506,7 @@ class RetrievalService:
             raise ValidationError(f"invalid find pattern: {exc}") from exc
         role_filter = set(source_roles or roles or ())
         scope_prefix = (
-            canonical_path(scope, base=self.indexer.root) if scope else None
+            resolve_source_path(scope, self.indexer.root, cwd) if scope else None
         )
         results: list[FindResult] = []
         for row in self.store.documents():
@@ -585,9 +620,11 @@ class RetrievalService:
         start_line: int | None = None,
         end_line: int | None = None,
         page: int | None = None,
+        *,
+        cwd: str | Path | None = None,
     ) -> ReadResult:
         self._reconcile_freshness()
-        canonical = canonical_path(path, base=self.indexer.root)
+        canonical = resolve_source_path(path, self.indexer.root, cwd)
         row = self.store.document(canonical)
         if row is None:
             if not Path(canonical).exists():

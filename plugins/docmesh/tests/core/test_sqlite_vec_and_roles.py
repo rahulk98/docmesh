@@ -31,7 +31,10 @@ def test_sqlite_vec_path_is_used_when_extension_is_available(tmp_path: Path) -> 
     source = tmp_path / "guide.md"
     source.write_text(
         "# Guide\nVector retrieval finds the closest passage across the whole"
-        " indexed corpus quickly.",
+        " indexed corpus quickly. It ranks documents by comparing the query"
+        " embedding against every stored passage embedding, then returns the"
+        " nearest matches for the caller to review alongside lexical results"
+        " from the full text search index.",
         encoding="utf-8",
     )
     store = SQLiteIndex(":memory:")

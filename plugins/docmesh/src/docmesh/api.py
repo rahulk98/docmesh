@@ -78,6 +78,24 @@ def _indexer(
     )
 
 
+def _split_documents_and_mirrors(worker: Indexer, value: dict[str, Any]) -> None:
+    """Report source documents and generated mirrors separately.
+
+    ``count_documents()``/the indexer's status counts every active row,
+    including a PDF's own generated Markdown mirror -- doubling the visible
+    total. Mirrors are never a source a caller indexed; split them out here
+    rather than in the shared counting path.
+    """
+
+    if "documents" not in value:
+        return
+    mirrors = worker.store.conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE active=1 AND role='mirror'"
+    ).fetchone()[0]
+    value["documents"] = value["documents"] - mirrors
+    value["mirrors"] = mirrors
+
+
 def _embedder_from_arguments(arguments: Mapping[str, Any]) -> object | None:
     # Deterministic embeddings are a test-only opt-in.  A normal operation
     # leaves this unset so Indexer constructs production FastEmbed locally.
@@ -151,7 +169,9 @@ def index(
     )
     try:
         values = paths if paths is not None else changed_paths
-        return worker.index(values, force=force).to_dict()
+        result = worker.index(values, force=force).to_dict()
+        _split_documents_and_mirrors(worker, result)
+        return result
     finally:
         worker.store.close()
 
@@ -168,6 +188,7 @@ def status(
     worker = _indexer(project_root, db_path=db_path, load_model=False)
     try:
         value = worker.status().to_dict()
+        _split_documents_and_mirrors(worker, value)
         value["manifest"] = worker.manifest.to_dict()
         return value
     finally:
@@ -312,6 +333,7 @@ def find(
             cursor,
             source_roles=kwargs.get("source_roles") or kwargs.get("roles"),
             scope=kwargs.get("scope"),
+            cwd=kwargs.get("cwd"),
         )
     finally:
         worker.store.close()
@@ -331,7 +353,9 @@ def read(
         embedder=_embedder_from_arguments(kwargs),
     )
     try:
-        return RetrievalService(worker).read(path, start_line, end_line, page)
+        return RetrievalService(worker).read(
+            path, start_line, end_line, page, cwd=kwargs.get("cwd")
+        )
     finally:
         worker.store.close()
 

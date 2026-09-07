@@ -14,7 +14,10 @@ def test_low_signal_chunk_is_excluded_from_vector_table_but_fts_searchable(
     source.write_text(
         "# Figure\n0.1 0.2 0.3 0.4 0.5\n1e-3 1e-2 1e-1 axis\n\n"
         "## Discussion\nThis section explains the background of the method"
-        " in real prose with enough distinct words to be a normal chunk.\n",
+        " in real prose with enough distinct words to be a normal chunk."
+        " It also walks through the experimental setup, the datasets used"
+        " for evaluation, and the baseline comparisons reported in the"
+        " results table so the document reads as substantive prose overall.\n",
         encoding="utf-8",
     )
     store = SQLiteIndex(":memory:")

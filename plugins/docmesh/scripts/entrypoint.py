@@ -202,6 +202,11 @@ def execute(args: argparse.Namespace) -> tuple[int, Any]:
         arguments["pattern"] = arguments.pop("query")
     if operation == "read" and arguments.get("path") is None and args.paths:
         arguments["path"] = args.paths[0]
+    if operation in ("read", "find"):
+        # The CLI's invoking cwd, not this re-exec chain's cwd -- nothing
+        # upstream (docmesh launcher, pyresolve) changes directory, so
+        # os.getcwd() here is still the caller's original working directory.
+        arguments.setdefault("cwd", os.getcwd())
     arguments["project_root"] = str(root)
     result = core_call(operation, arguments, project=root)
     record_core_result(root, operation, result)

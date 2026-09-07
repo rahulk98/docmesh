@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
@@ -90,6 +91,7 @@ def execute(args: argparse.Namespace) -> Any:
             cursor=args.cursor,
             source_roles=args.source_roles,
             scope=args.scope,
+            cwd=os.getcwd(),
         )
     if operation == "read":
         return api.read(
@@ -98,6 +100,7 @@ def execute(args: argparse.Namespace) -> Any:
             start_line=args.start_line,
             end_line=args.end_line,
             page=args.page,
+            cwd=os.getcwd(),
         )
     if operation == "impact_start":
         return api.impact_start(

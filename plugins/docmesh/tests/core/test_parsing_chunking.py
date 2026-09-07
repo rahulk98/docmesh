@@ -97,6 +97,40 @@ def test_is_low_signal_chunk_flags_bare_axis_labels() -> None:
     )
 
 
+def test_is_low_signal_chunk_flags_axis_labels_with_few_distinct_words() -> None:
+    # Real bug: a figure axis-label chunk (LoRA_wikisql.pdf) clears an 8+
+    # bare-word-count threshold, but has only a handful of distinct real
+    # words among a wall of numeric tick marks.
+    assert is_low_signal_chunk(
+        "6 7 8 9 10 11\nlog10 # Trainable Parameters\n0.55 0.60 0.65 0.70 0.75"
+        " Validation Accuracy"
+    )
+
+
+def test_is_low_signal_chunk_keeps_short_real_prose() -> None:
+    # A short but genuine prose chunk (6+ distinct real words, low numeric
+    # share) must stay vectorized even though it is brief.
+    assert not is_low_signal_chunk(
+        "We fine-tune the model using low rank adapters on each layer."
+    )
+
+
+def test_is_low_signal_document_flags_short_figure_only_totals() -> None:
+    from docmesh.chunking import document_word_tokens, is_low_signal_document
+
+    figure_texts = [
+        "QLoRA-All QLoRA-FFN Model",
+        "60 61 62 63 64 RougeL",
+    ]
+    assert is_low_signal_document(document_word_tokens(figure_texts))
+
+    prose_texts = [
+        "This section explains the background of the method in detail " * 3,
+        "It then describes the experimental setup used for evaluation " * 3,
+    ]
+    assert not is_low_signal_document(document_word_tokens(prose_texts))
+
+
 def test_parse_file_strips_utf8_bom(tmp_path) -> None:
     path = tmp_path / "bom.md"
     path.write_bytes("﻿# Title\nBody text.".encode("utf-8"))

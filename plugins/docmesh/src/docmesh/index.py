@@ -12,7 +12,13 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
 
-from .chunking import Chunker, compute_embedding_strategy_id, is_low_signal_chunk
+from .chunking import (
+    Chunker,
+    compute_embedding_strategy_id,
+    document_word_tokens,
+    is_low_signal_chunk,
+    is_low_signal_document,
+)
 from .config import (
     canonical_path,
     discover_corpus,
@@ -439,6 +445,9 @@ class SQLiteIndex:
                 (path,),
             )
             self.conn.execute("DELETE FROM chunks WHERE document_path=?", (path,))
+            document_is_figure_like = is_low_signal_document(
+                document_word_tokens([chunk.text for chunk in chunks])
+            )
             self.conn.execute(
                 "INSERT INTO documents(path,role,format,content,file_hash,indexed_at,active,generated_from) VALUES(?,?,?,?,?,?,1,?) "
                 "ON CONFLICT(path) DO UPDATE SET role=excluded.role, format=excluded.format, content=excluded.content, file_hash=excluded.file_hash, indexed_at=excluded.indexed_at, active=1, generated_from=excluded.generated_from",
@@ -480,11 +489,13 @@ class SQLiteIndex:
                     "INSERT INTO chunks_fts(rowid,breadcrumb,text) VALUES(?,?,?)",
                     (chunk_id, chunk.breadcrumb, chunk.text),
                 )
-                if is_low_signal_chunk(chunk.text):
+                if document_is_figure_like or is_low_signal_chunk(chunk.text):
                     # Stored and FTS-searchable above; a near-empty/degenerate
                     # chunk (bare axis labels, figure scraps) embeds to a
                     # spuriously "central" vector that wins unrelated queries,
-                    # so it must not enter the vector table.
+                    # so it must not enter the vector table.  A whole
+                    # figure-only document is excluded even if one chunk's
+                    # scattered labels happen to clear the per-chunk bar.
                     continue
                 if isinstance(vector, bytes):
                     blob = vector
@@ -911,8 +922,20 @@ class Indexer:
                     self.store.conn.execute("DELETE FROM docmesh_vec")
                 except sqlite3.DatabaseError:
                     self.store._vec_table_name = None
+            doc_word_totals: dict[str, int] = {}
+            for row in self.store.conn.execute(
+                "SELECT document_path, text FROM chunks"
+            ):
+                doc_word_totals[row["document_path"]] = doc_word_totals.get(
+                    row["document_path"], 0
+                ) + document_word_tokens([row["text"]])
+            figure_like_documents = {
+                path
+                for path, total in doc_word_totals.items()
+                if is_low_signal_document(total)
+            }
             cursor = self.store.conn.execute(
-                "SELECT id, text, embedding_input FROM chunks ORDER BY id"
+                "SELECT id, text, embedding_input, document_path FROM chunks ORDER BY id"
             )
             inserted = 0
             while True:
@@ -928,7 +951,10 @@ class Indexer:
                         "embedding backend must return one vector per chunk"
                     )
                 for row, vector in zip(batch, vectors):
-                    if is_low_signal_chunk(row["text"]):
+                    if (
+                        row["document_path"] in figure_like_documents
+                        or is_low_signal_chunk(row["text"])
+                    ):
                         continue
                     values = list(vector)
                     self.store.conn.execute(

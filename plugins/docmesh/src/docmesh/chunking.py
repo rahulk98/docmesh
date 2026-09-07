@@ -12,29 +12,58 @@ from .models import Chunk, Manifest, Section
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
+_ALPHA_WORD_RE = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
 _TOKEN_COUNT_DISPATCH_VERSION = "count_tokens-first-v1"
 _DEFAULT_CHUNKING_VERSION = "v1-recursive-lines-paragraphs-token-count-probe"
-LOW_SIGNAL_FILTER_VERSION = "low-signal-vector-filter-v1"
-LOW_SIGNAL_MIN_WORD_TOKENS = 8
+LOW_SIGNAL_FILTER_VERSION = "low-signal-vector-filter-v2"
 LOW_SIGNAL_MIN_ALPHA_RATIO = 0.5
+LOW_SIGNAL_MIN_DISTINCT_WORDS = 6
+LOW_SIGNAL_MAX_NUMERIC_RATIO = 0.5
+DOCUMENT_LOW_SIGNAL_MIN_WORDS = 40
 
 
 def is_low_signal_chunk(text: str) -> bool:
     """Degenerate near-empty chunks (bare axis labels, figure scraps) embed to
     a spuriously "central" vector that then wins unrelated queries.  Such
     chunks stay stored and FTS-searchable but must not enter the vector
-    table."""
+    table.
+
+    A chunk full of short/duplicated axis-label words (e.g. a repeated model
+    name plus numeric tick marks) can clear a bare word-count threshold while
+    carrying almost no distinguishing content, so this counts *distinct*
+    alphabetic words of length 3+ and also caps how much of the chunk is
+    numeric tokens (tick marks, percentages)."""
 
     stripped = text.strip()
     if not stripped:
         return True
-    word_tokens = len(_WORD_RE.findall(stripped))
     alpha_chars = sum(1 for char in stripped if char.isalpha())
     alpha_ratio = alpha_chars / len(stripped)
+    distinct_words = {w.lower() for w in _ALPHA_WORD_RE.findall(stripped)}
+    tokens = _TOKEN_RE.findall(stripped)
+    numeric_tokens = sum(1 for tok in tokens if tok.isdigit())
+    numeric_ratio = numeric_tokens / len(tokens) if tokens else 1.0
     return (
-        word_tokens < LOW_SIGNAL_MIN_WORD_TOKENS
-        or alpha_ratio < LOW_SIGNAL_MIN_ALPHA_RATIO
+        alpha_ratio < LOW_SIGNAL_MIN_ALPHA_RATIO
+        or len(distinct_words) < LOW_SIGNAL_MIN_DISTINCT_WORDS
+        or numeric_ratio > LOW_SIGNAL_MAX_NUMERIC_RATIO
     )
+
+
+def document_word_tokens(texts: Sequence[str]) -> int:
+    """Total word-token count across a document's chunks, used to spot
+    figure-only documents whose scattered labels never individually clear
+    the per-chunk threshold but never add up to real prose either."""
+
+    return sum(len(_WORD_RE.findall(text)) for text in texts)
+
+
+def is_low_signal_document(total_word_tokens: int) -> bool:
+    """A whole document this short is figure/table scraps, not prose: none
+    of its chunks should get vectors even if a chunk-level check would let
+    one slip through."""
+
+    return total_word_tokens < DOCUMENT_LOW_SIGNAL_MIN_WORDS
 
 
 class TokenBudgetError(ValueError):

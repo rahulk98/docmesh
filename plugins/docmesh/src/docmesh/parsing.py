@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import io
 import re
@@ -377,6 +378,14 @@ def write_pdf_mirror(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+    finally:
+        # pypdf's parsed objects (pages, form XObjects, fonts) reference the
+        # reader and each other, so refcounting alone can't reclaim them;
+        # without an explicit collection here the cycles pile up across a
+        # multi-PDF indexing run until Python's own gc thresholds catch up,
+        # which is what drove multi-GB peak RSS on large corpora.
+        del reader
+        gc.collect()
     tmp_path.replace(mirror_path)
     return True
 
