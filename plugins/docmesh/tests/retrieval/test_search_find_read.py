@@ -174,6 +174,8 @@ def test_search_collapses_overlapping_chunks_for_the_same_path(
 
 
 def test_bench_reports_mean_reciprocal_rank_and_recall_at_8(tmp_path: Path) -> None:
+    (tmp_path / ".docmesh").mkdir()
+    (tmp_path / ".docmesh" / "manifest.toml").write_text("version = 1\n", encoding="utf-8")
     (tmp_path / "guide.md").write_text(
         "# Guide\nThe canonical policy applies.\n", encoding="utf-8"
     )

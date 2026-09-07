@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import api
+from .argspec import OPERATIONS, add_common_arguments
 from .models import DocMeshError
 
 
@@ -22,69 +23,9 @@ def _parser() -> argparse.ArgumentParser:
         "operation",
         nargs="?",
         default="status",
-        choices=(
-            "setup",
-            "init",
-            "index",
-            "status",
-            "doctor",
-            "probe-hooks",
-            "search",
-            "find",
-            "read",
-            "bench",
-            "impact-start",
-            "impact_start",
-            "impact-page",
-            "impact_page",
-            "impact-read",
-            "impact_read",
-            "impact-classify",
-            "impact_classify",
-            "impact-finish",
-            "impact_finish",
-        ),
+        choices=OPERATIONS,
     )
-    parser.add_argument("--project-root", "--root", default=".")
-    parser.add_argument("--db-path", default=None)
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--approve", "--yes", action="store_true")
-    parser.add_argument("--detailed", action="store_true")
-    parser.add_argument("--deterministic", action="store_true")
-    parser.add_argument("--use-fastembed", action="store_true")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--cache-dir", default=None)
-    parser.add_argument("--download-model", dest="download_model", action="store_true")
-    parser.add_argument(
-        "--no-download-model", dest="download_model", action="store_false"
-    )
-    parser.set_defaults(download_model=None)
-    parser.add_argument("--paths", nargs="*", default=None)
-    parser.add_argument("--query", default=None)
-    parser.add_argument("--limit", type=int, default=8)
-    parser.add_argument("--snippet-only", action="store_true")
-    parser.add_argument("--max-snippet-length", type=int, default=None)
-    parser.add_argument("--pattern", default=None)
-    parser.add_argument("--mode", default="literal")
-    parser.add_argument("--cursor", default=None)
-    parser.add_argument("--path", default=None)
-    parser.add_argument("--start-line", type=int, default=None)
-    parser.add_argument("--end-line", type=int, default=None)
-    parser.add_argument("--page", type=int, default=None)
-    parser.add_argument("--phase", default="discover")
-    parser.add_argument("--query-bundle", default=None)
-    parser.add_argument("--source-roles", nargs="*", default=None)
-    parser.add_argument("--scope", default=None)
-    parser.add_argument("--page-size", type=int, default=20)
-    parser.add_argument("--baseline-run-id", default=None)
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--candidate-id", default=None)
-    parser.add_argument("--context-lines", type=int, default=20)
-    parser.add_argument("--decisions", default=None)
-    parser.add_argument("--queries", default=None)
-    return parser
+    return add_common_arguments(parser)
 
 
 def _json_argument(value: str | None, name: str, default: Any = None) -> Any:
@@ -131,7 +72,7 @@ def execute(args: argparse.Namespace) -> Any:
         return api.search(
             **common,
             query=args.query or "",
-            limit=args.limit,
+            limit=args.limit if args.limit is not None else 8,
             source_roles=args.source_roles,
             snippet_only=args.snippet_only,
             max_snippet_length=args.max_snippet_length,
@@ -145,7 +86,7 @@ def execute(args: argparse.Namespace) -> Any:
         return api.find(
             **common,
             pattern=args.pattern if args.pattern is not None else (args.query or ""),
-            mode=args.mode,
+            mode=args.mode if args.mode is not None else "literal",
             cursor=args.cursor,
             source_roles=args.source_roles,
             scope=args.scope,
@@ -161,10 +102,10 @@ def execute(args: argparse.Namespace) -> Any:
     if operation == "impact_start":
         return api.impact_start(
             **common,
-            phase=args.phase,
+            phase=args.phase if args.phase is not None else "discover",
             query_bundle=_json_argument(args.query_bundle, "query-bundle"),
             source_roles=args.source_roles,
-            page_size=args.page_size,
+            page_size=args.page_size if args.page_size is not None else 20,
             baseline_run_id=args.baseline_run_id,
         )
     if operation == "impact_page":
@@ -174,7 +115,7 @@ def execute(args: argparse.Namespace) -> Any:
             **common,
             run_id=args.run_id or "",
             candidate_id=args.candidate_id or "",
-            context_lines=args.context_lines,
+            context_lines=args.context_lines if args.context_lines is not None else 20,
         )
     if operation == "impact_classify":
         return api.impact_classify(
@@ -251,7 +192,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         status = 1
     print(
         json.dumps(
-            payload if True else payload["data"], ensure_ascii=False, sort_keys=True
+            payload, ensure_ascii=False, sort_keys=True
         )
     )
     return status

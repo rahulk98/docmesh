@@ -11,8 +11,30 @@ from dataclasses import dataclass
 from .models import Chunk, Manifest, Section
 
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+_WORD_RE = re.compile(r"[^\W\d_]{2,}", re.UNICODE)
 _TOKEN_COUNT_DISPATCH_VERSION = "count_tokens-first-v1"
 _DEFAULT_CHUNKING_VERSION = "v1-recursive-lines-paragraphs-token-count-probe"
+LOW_SIGNAL_FILTER_VERSION = "low-signal-vector-filter-v1"
+LOW_SIGNAL_MIN_WORD_TOKENS = 8
+LOW_SIGNAL_MIN_ALPHA_RATIO = 0.5
+
+
+def is_low_signal_chunk(text: str) -> bool:
+    """Degenerate near-empty chunks (bare axis labels, figure scraps) embed to
+    a spuriously "central" vector that then wins unrelated queries.  Such
+    chunks stay stored and FTS-searchable but must not enter the vector
+    table."""
+
+    stripped = text.strip()
+    if not stripped:
+        return True
+    word_tokens = len(_WORD_RE.findall(stripped))
+    alpha_chars = sum(1 for char in stripped if char.isalpha())
+    alpha_ratio = alpha_chars / len(stripped)
+    return (
+        word_tokens < LOW_SIGNAL_MIN_WORD_TOKENS
+        or alpha_ratio < LOW_SIGNAL_MIN_ALPHA_RATIO
+    )
 
 
 class TokenBudgetError(ValueError):
@@ -28,7 +50,12 @@ class ApproximateTokenizer:
         return _TOKEN_RE.findall(text)
 
     def count(self, text: str) -> int:
-        return len(self.encode(text))
+        # An unbroken \w+ run (no whitespace/punctuation) matches as a single
+        # token no matter how long it is, so a 500KB run of word characters
+        # would otherwise report as ~1 token and never trip the hard limit.
+        # Real wordpiece tokenizers never exceed ~4 chars/token on average, so
+        # a char/4 floor keeps this approximation from ever undercounting.
+        return max(len(self.encode(text)), -(-len(text) // 4))
 
 
 def token_count(text: str, tokenizer: object | None = None) -> int:
@@ -76,6 +103,7 @@ def compute_embedding_strategy_id(
         # indexes built while FastEmbed was silently approximated would look
         # compatible after upgrading the tokenizer wiring.
         "token_count_dispatch": _TOKEN_COUNT_DISPATCH_VERSION,
+        "low_signal_filter_version": LOW_SIGNAL_FILTER_VERSION,
         "breadcrumb_format": breadcrumb_format,
         "retrieval_prefix": retrieval_prefix,
     }

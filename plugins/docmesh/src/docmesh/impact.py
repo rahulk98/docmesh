@@ -58,6 +58,15 @@ def _candidate_from_mapping(value: Mapping[str, Any]) -> ImpactCandidate:
     )
 
 
+#: page ordering / semantic-cap priority: higher wins ties and sorts first.
+_MATCH_KIND_PRIORITY = {"exact_term": 2, "alias": 1, "semantic_only": 0}
+
+#: default cap on semantic-only candidates per discovery run (F-paper-3).
+#: exact_term/alias hits are never capped - only paraphrase/implication
+#: matches that no exact term or alias also touched.
+DEFAULT_SEMANTIC_LIMIT = 50
+
+
 def _bundle(value: ImpactQueryBundle | Mapping[str, Any]) -> ImpactQueryBundle:
     return (
         value
@@ -141,6 +150,8 @@ class ImpactEngine:
         text: str,
         channels: Iterable[str],
         scores: Mapping[str, float] | None = None,
+        match_kind: str = "semantic_only",
+        matched_terms: Iterable[str] = (),
     ) -> ImpactCandidate:
         return ImpactCandidate(
             _candidate_id(location),
@@ -148,6 +159,8 @@ class ImpactEngine:
             text,
             tuple(sorted(set(channels))),
             dict(scores or {}),
+            match_kind=match_kind,
+            matched_terms=list(dict.fromkeys(matched_terms)),
         )
 
     def _merge_candidate(
@@ -159,9 +172,20 @@ class ImpactEngine:
             return
         old.channels = tuple(sorted(set(old.channels) | set(candidate.channels)))
         old.retrieval_scores.update(candidate.retrieval_scores)
+        old.matched_terms = list(
+            dict.fromkeys(old.matched_terms + candidate.matched_terms)
+        )
+        if _MATCH_KIND_PRIORITY[candidate.match_kind] > _MATCH_KIND_PRIORITY[
+            old.match_kind
+        ]:
+            old.match_kind = candidate.match_kind
 
     def _resolve_and_validate(
-        self, candidate: ImpactCandidate, *, query: str = ""
+        self,
+        candidate: ImpactCandidate,
+        *,
+        query: str = "",
+        reindexed_paths: set[str] | None = None,
     ) -> ImpactCandidate:
         try:
             candidate.location = self.retrieval.validate_location(candidate.location)
@@ -171,7 +195,15 @@ class ImpactEngine:
             # A dirty hook may race candidate generation.  Reindex exactly the
             # affected source, then resolve once against fresh chunks.  A
             # second failure is actionable and aborts freezing the run.
-            self.indexer.reindex_path(candidate.location.path)
+            # Once a path has been reindexed for this run, later candidates in
+            # the same file must not re-trigger a full re-extraction (this is
+            # what made reference-scoped, PDF-heavy discovery hang: one
+            # re-extraction per failing candidate in the same file).
+            path_key = str(candidate.location.path)
+            if reindexed_paths is None or path_key not in reindexed_paths:
+                self.indexer.reindex_path(candidate.location.path)
+                if reindexed_paths is not None:
+                    reindexed_paths.add(path_key)
             fresh: ImpactCandidate | None = None
             for row in self.indexer.store.chunks(candidate.location.path):
                 if str(row["text"]) == candidate.text or (
@@ -198,66 +230,100 @@ class ImpactEngine:
             return fresh
 
     def _generate_candidates(
-        self, bundle: ImpactQueryBundle, source_roles: Sequence[str]
-    ) -> list[ImpactCandidate]:
+        self,
+        bundle: ImpactQueryBundle,
+        source_roles: Sequence[str],
+        semantic_limit: int | None = DEFAULT_SEMANTIC_LIMIT,
+    ) -> tuple[list[ImpactCandidate], int]:
         candidates: dict[str, ImpactCandidate] = {}
-        exact_queries = list(
-            dict.fromkeys(list(bundle.exact_terms) + list(bundle.aliases))
-        )
-        if not exact_queries:
-            exact_queries = [bundle.canonical_claim]
-        for term in exact_queries:
-            if not str(term).strip():
-                continue
-            for result in self.retrieval.find(
-                term, mode="literal", source_roles=source_roles
-            ):
-                candidate = self._candidate_from_location(
-                    result.location,
-                    result.line_text or result.match,
-                    ("exact",),
-                    {"exact": 1.0},
-                )
-                self._merge_candidate(candidates, candidate)
-        expanded = bundle.expanded_queries()
-        for query in expanded:
-            if not query.strip():
-                continue
+        exact_terms = list(dict.fromkeys(bundle.exact_terms))
+        aliases = [term for term in dict.fromkeys(bundle.aliases) if term not in exact_terms]
+        if not exact_terms and not aliases:
+            exact_terms = [bundle.canonical_claim]
+        for match_kind, terms in (("exact_term", exact_terms), ("alias", aliases)):
+            for term in terms:
+                if not str(term).strip():
+                    continue
+                for result in self.retrieval.find(
+                    term, mode="literal", source_roles=source_roles
+                ):
+                    candidate = self._candidate_from_location(
+                        result.location,
+                        result.line_text or result.match,
+                        ("exact",),
+                        {"exact": 1.0},
+                        match_kind=match_kind,
+                        matched_terms=[term],
+                    )
+                    self._merge_candidate(candidates, candidate)
+        exact_and_alias = set(exact_terms) | set(aliases)
+        semantic_queries = [
+            query for query in bundle.expanded_queries() if query.strip()
+        ]
+        for query in semantic_queries:
             # RetrievalService returns the RRF union of lexical and vector
             # channels.  Each channel is independently capped at 200 there,
             # satisfying the recall-first candidate budget.
             for search_result in self.retrieval.search(
                 query, limit=400, source_roles=source_roles
             ):
+                match_kind = "semantic_only" if query not in exact_and_alias else (
+                    "exact_term" if query in exact_terms else "alias"
+                )
                 candidate = self._candidate_from_location(
                     search_result.location,
                     search_result.text,
                     search_result.channels,
                     {"rrf": search_result.score},
+                    match_kind=match_kind,
+                    matched_terms=[query],
                 )
                 self._merge_candidate(candidates, candidate)
+
+        # Cap semantic-only candidates (never touched by an exact/alias hit).
+        # Exact and alias hits are always exhaustive per the recall-first
+        # contract; only the paraphrase/implication tail is bounded, and the
+        # cap is reported in metrics so it is never silent (F-paper-3).
+        semantic_only = [
+            item for item in candidates.values() if item.match_kind == "semantic_only"
+        ]
+        semantic_dropped = 0
+        if semantic_limit is not None and len(semantic_only) > semantic_limit:
+            semantic_only.sort(
+                key=lambda item: max(item.retrieval_scores.values(), default=0.0),
+                reverse=True,
+            )
+            dropped_ids = {item.candidate_id for item in semantic_only[semantic_limit:]}
+            semantic_dropped = len(dropped_ids)
+            for candidate_id in dropped_ids:
+                del candidates[candidate_id]
+
         ordered = sorted(
             candidates.values(),
             key=lambda item: (
+                -_MATCH_KIND_PRIORITY[item.match_kind],
                 item.location.path,
                 item.location.page or 0,
                 item.location.start_line or 0,
                 item.candidate_id,
             ),
         )
+        reindexed_paths: set[str] = set()
         validated: list[ImpactCandidate] = []
         for candidate in ordered:
             # Search candidates carry chunk passages as useful context; exact
             # candidates carry the complete source line/page.  Validation is
             # always against the source location, never against the passage.
             resolved = self._resolve_and_validate(
-                candidate, query=bundle.canonical_claim
+                candidate,
+                query=bundle.canonical_claim,
+                reindexed_paths=reindexed_paths,
             )
             # A source may change role between retrieval and validation.  Do
             # not leak a now-reference/mirror location into an editable run.
             if resolved.location.role in source_roles:
                 validated.append(resolved)
-        return validated
+        return validated, semantic_dropped
 
     def impact_start(
         self,
@@ -266,6 +332,7 @@ class ImpactEngine:
         source_roles: Sequence[str] | None = None,
         page_size: int = 20,
         baseline_run_id: str | None = None,
+        semantic_limit: int | None = DEFAULT_SEMANTIC_LIMIT,
     ) -> ImpactRun:
         if phase not in ("discover", "verify"):
             raise ValidationError("impact phase must be discover or verify")
@@ -314,7 +381,9 @@ class ImpactEngine:
         if not bundle.canonical_claim.strip():
             raise ValidationError("canonical_claim must not be empty")
         started = time.monotonic()
-        candidates = self._generate_candidates(bundle, roles)
+        candidates, semantic_dropped = self._generate_candidates(
+            bundle, roles, semantic_limit
+        )
         run_id = str(uuid.uuid4())
         run = ImpactRun(
             run_id,
@@ -330,6 +399,15 @@ class ImpactEngine:
             scope_drift=drift,
             created_at=_now(),
         )
+        match_kind_counts: dict[str, int] = {}
+        role_counts: dict[str, int] = {}
+        for candidate in candidates:
+            match_kind_counts[candidate.match_kind] = (
+                match_kind_counts.get(candidate.match_kind, 0) + 1
+            )
+            role_counts[candidate.location.role] = (
+                role_counts.get(candidate.location.role, 0) + 1
+            )
         run.metrics = {
             "candidate_burden": len(candidates),
             "candidate_count": len(candidates),
@@ -341,6 +419,10 @@ class ImpactEngine:
                 len(candidate.text.split()) for candidate in candidates
             ),
             "latency_ms": round((time.monotonic() - started) * 1000.0, 3),
+            "by_match_kind": match_kind_counts,
+            "by_role": role_counts,
+            "semantic_limit": semantic_limit,
+            "semantic_only_dropped": semantic_dropped,
         }
         self._persist(run)
         return run

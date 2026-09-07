@@ -29,7 +29,11 @@ def test_document_role_is_updated_on_replace_conflict(tmp_path: Path) -> None:
 
 def test_sqlite_vec_path_is_used_when_extension_is_available(tmp_path: Path) -> None:
     source = tmp_path / "guide.md"
-    source.write_text("# Guide\nVector retrieval.", encoding="utf-8")
+    source.write_text(
+        "# Guide\nVector retrieval finds the closest passage across the whole"
+        " indexed corpus quickly.",
+        encoding="utf-8",
+    )
     store = SQLiteIndex(":memory:")
     indexer = Indexer(tmp_path, index=store, embedder=DeterministicEmbedder(8))
     indexer.index()

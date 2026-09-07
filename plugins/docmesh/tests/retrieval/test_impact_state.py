@@ -121,3 +121,85 @@ def test_invalid_impact_location_gets_one_targeted_reindex_before_return(
     assert run.candidates and run.candidates[0].resolved
     assert len(validation_calls) == 2
     assert reindex_calls == [str(source.resolve())]
+
+
+def test_candidates_are_tagged_with_match_kind_and_ordered_exact_first(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle(
+            "cache policy",
+            exact_terms=["cache policy"],
+            semantic_queries=["storage rules"],
+        ),
+        page_size=20,
+    )
+    assert run.candidates
+    kinds = [candidate.match_kind for candidate in run.candidates]
+    assert all(kind in ("exact_term", "alias", "semantic_only") for kind in kinds)
+    # exact_term candidates must sort before any semantic_only candidate.
+    priority = {"exact_term": 2, "alias": 1, "semantic_only": 0}
+    ranks = [priority[kind] for kind in kinds]
+    assert ranks == sorted(ranks, reverse=True)
+    exact = [c for c in run.candidates if c.match_kind == "exact_term"]
+    assert exact and all(c.matched_terms == ["cache policy"] for c in exact)
+    assert run.metrics["by_match_kind"]
+    assert run.metrics["semantic_limit"] == 50
+    assert run.metrics["semantic_only_dropped"] == 0
+
+
+def test_semantic_limit_caps_semantic_only_candidates_and_reports_the_cap(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle(
+            "cache policy",
+            exact_terms=["cache policy"],
+            semantic_queries=["storage rules", "retention plan"],
+        ),
+        page_size=20,
+        semantic_limit=0,
+    )
+    assert all(c.match_kind != "semantic_only" for c in run.candidates)
+    assert run.metrics["semantic_limit"] == 0
+    # exact hits are never capped
+    assert any(c.match_kind == "exact_term" for c in run.candidates)
+
+
+def test_api_impact_start_returns_only_run_id_counts_and_first_page(
+    tmp_path: Path,
+) -> None:
+    from docmesh import api
+
+    (tmp_path / "a.md").write_text(
+        "# A\nThe cache policy is documented here.", encoding="utf-8"
+    )
+    (tmp_path / "b.md").write_text(
+        "# B\nThe cache policy is documented there.", encoding="utf-8"
+    )
+    api.setup(project_root=tmp_path, deterministic=True, approve=True)
+    result = api.impact_start(
+        project_root=tmp_path,
+        query_bundle={"canonical_claim": "cache policy", "exact_terms": ["cache policy"]},
+        page_size=1,
+        deterministic=True,
+    )
+    payload = result.to_dict()
+    assert set(payload) == {
+        "run_id",
+        "phase",
+        "status",
+        "source_roles",
+        "page_size",
+        "semantic_limit",
+        "counts",
+        "first_page",
+        "metrics",
+    }
+    assert payload["counts"]["total"] >= 1
+    # the first page must never carry the full candidate set.
+    assert len(payload["first_page"]["candidates"]) <= payload["page_size"]
+    if payload["counts"]["total"] > payload["page_size"]:
+        assert payload["first_page"]["next_cursor"] is not None

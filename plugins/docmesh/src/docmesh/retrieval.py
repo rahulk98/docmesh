@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import bisect
 import hashlib
+import os
 import re
 import sqlite3
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
@@ -20,13 +23,13 @@ from .models import (
     SearchResult,
     SourceLocation,
     StaleSourceError,
-    UnsupportedDocumentError,
     ValidationError,
 )
 from .parsing import line_at, parse_file, span_text
 
 RRF_K = 60
 DEFAULT_RESULT_LIMIT = 8
+_LAST_RECONCILE_KEY = "retrieval_last_reconcile_attempt"
 MAX_CHANNEL_CANDIDATES = 200
 
 RowLike = sqlite3.Row | Mapping[str, Any]
@@ -79,6 +82,36 @@ def _line_for_offset(text: str, offset: int) -> int:
     return text.count("\n", 0, max(0, offset)) + 1
 
 
+class _LineIndex:
+    """Amortizes line/column/span lookups over many matches in one document.
+
+    Built once per document (O(n) in file size); every lookup afterward is
+    O(log lines), replacing what used to be a fresh ``text.count``/
+    ``splitlines()``/``rfind`` scan of the whole document per match.
+    """
+
+    __slots__ = ("_newline_at", "_line_starts", "_lines")
+
+    def __init__(self, text: str) -> None:
+        newline_at = [index for index, char in enumerate(text) if char == "\n"]
+        self._newline_at = newline_at
+        self._line_starts = [0] + [index + 1 for index in newline_at]
+        self._lines = text.splitlines()
+
+    def line_for_offset(self, offset: int) -> int:
+        return bisect.bisect_left(self._newline_at, max(0, offset)) + 1
+
+    def line_start_offset(self, line: int) -> int:
+        index = line - 1
+        starts = self._line_starts
+        if 0 <= index < len(starts):
+            return starts[index]
+        return starts[-1]
+
+    def span(self, start_line: int, end_line: int) -> str:
+        return "\n".join(self._lines[start_line - 1 : end_line])
+
+
 def _span_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -102,16 +135,131 @@ def _row_mapping(row: RowLike) -> dict[str, Any]:
 class RetrievalService:
     def __init__(self, indexer: Indexer) -> None:
         self.indexer = indexer
+        self._pdf_hash_cache: dict[str, tuple[tuple[int, float], str]] = {}
 
     @property
     def store(self) -> SQLiteIndex:
         return self.indexer.store
 
+    def _ensure_pdf_current(self, path: str) -> str:
+        """Cheap size/mtime precheck; sha256 (and reindex-if-changed) at
+        most once per file per RetrievalService instance (one instance per
+        top-level api.py call). Never extracts PDF text: pypdf extraction
+        is both slow and, on pathological PDFs, not stable across process
+        runs (F-paper-4), so file identity -- not re-extracted content --
+        is the only thing that can mark a stored PDF span stale. Returns
+        the file's current sha256 hex digest.
+        """
+        stat = Path(path).stat()
+        signature = (stat.st_size, stat.st_mtime)
+        cached = self._pdf_hash_cache.get(path)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        current_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        document = self.store.document(path)
+        if document is None or str(document["file_hash"]) != current_hash:
+            self.indexer.index(paths=[path])
+        self._pdf_hash_cache[path] = (signature, current_hash)
+        return current_hash
+
     def _reconcile_freshness(self) -> None:
-        # A query is a synchronization boundary.  Incremental indexing skips
-        # unchanged paths, so this remains cheap for a steady-state corpus and
-        # catches edits whose post-edit hook was missed.
-        self.indexer.index()
+        # A query is a synchronization boundary, but the naive form of that
+        # (a full ``index()`` scan) reads and sha256-hashes every source's
+        # full bytes on every single query, and re-parses any PDF whose hash
+        # changed. For a large corpus that dwarfs the actual find/search
+        # cost (F-find-1). ``indexed_at`` is already stored per document, so
+        # a cheap mtime comparison tells us which paths could possibly have
+        # changed; only those go through the real (hash + reindex) path.
+        # Newly added files are still caught via discovery, which is a
+        # filesystem walk, not a content read.
+        stale: set[str] = set()
+        rows = self.store.conn.execute(
+            "SELECT path, indexed_at FROM documents WHERE active=1"
+        ).fetchall()
+        for path, indexed_at in rows:
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                stale.add(path)  # removed since indexing; let index() retire it
+                continue
+            if mtime > float(indexed_at):
+                stale.add(path)
+        try:
+            discovered = self.indexer._current_discovery()
+        except (OSError, FileNotFoundError, NotADirectoryError):
+            discovered = []
+        known = self.store.document_paths()
+        # A discovered path with no document row is either genuinely new or
+        # a source the indexer already tried and skipped (corrupt/encrypted
+        # PDF, binary file, ...). A skipped file never gets a document row,
+        # so re-parsing it every call was the bug: it looked "new" forever.
+        # Only retry it if it changed since the last time we looked -- the
+        # watermark below is either the last reconcile attempt or the newest
+        # successful index, whichever is later.
+        watermark = self._last_reconcile_watermark()
+        for item in discovered:
+            path = canonical_path(item.path)
+            if path in known:
+                continue
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                continue
+            if mtime > watermark:
+                stale.add(path)
+        if stale:
+            self.indexer.index(paths=sorted(stale))
+        self.store.conn.execute(
+            "INSERT INTO metadata(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_LAST_RECONCILE_KEY, str(time.time())),
+        )
+        self.store.conn.commit()
+
+    def _last_reconcile_watermark(self) -> float:
+        row = self.store.conn.execute(
+            "SELECT value FROM metadata WHERE key=?", (_LAST_RECONCILE_KEY,)
+        ).fetchone()
+        watermark = float(row[0]) if row else 0.0
+        newest = self.store.conn.execute(
+            "SELECT MAX(indexed_at) FROM documents WHERE active=1"
+        ).fetchone()
+        if newest and newest[0] is not None:
+            watermark = max(watermark, float(newest[0]))
+        return watermark
+
+    def _reconstruct_pdf_pages(self, path: str) -> dict[int, str]:
+        """Rebuild each PDF page's text from its already-stored chunks.
+
+        Chunking splits a page into ordered pieces carrying their original
+        ``start_line``/``end_line``. Most pieces span whole lines and join
+        back with ``"\\n"``; a line too long for one chunk is instead split
+        into same-line word pieces that must be concatenated directly (they
+        already carry their own trailing whitespace) or the reconstruction
+        silently drops spaces within that line (caught via a real span_hash
+        mismatch further downstream, F-paper-4). This never re-invokes pypdf
+        at query time (F-find-1). Valid only once the document row is
+        current, which callers must ensure (``_reconcile_freshness``).
+        """
+        by_page: dict[int, list[sqlite3.Row]] = {}
+        for row in self.store.chunks(path):
+            page = row["page"]
+            if page is None:
+                continue
+            by_page.setdefault(int(page), []).append(row)
+        pages: dict[int, str] = {}
+        for page, rows in by_page.items():
+            rows.sort(key=lambda item: int(item["ordinal"]))
+            parts: list[str] = []
+            prev_end_line: int | None = None
+            for row in rows:
+                start_line = int(row["start_line"])
+                if prev_end_line is not None and start_line != prev_end_line:
+                    parts.append("\n" * (start_line - prev_end_line))
+                parts.append(str(row["text"]))
+                prev_end_line = int(row["end_line"])
+            pages[page] = "".join(parts)
+        return pages
 
     def _location_for_row(self, row: RowLike) -> SourceLocation:
         values = _row_mapping(row)
@@ -121,21 +269,16 @@ class RetrievalService:
         stored_file_hash = str(values["file_hash"])
         if fmt == "pdf":
             page = int(values["page"] or 1)
-            try:
-                parsed = parse_file(path)
-                page_text = (
-                    parsed.pages[page - 1] if 1 <= page <= len(parsed.pages) else ""
-                )
-            except (
-                OSError,
-                RuntimeError,
-                TypeError,
-                ValueError,
-                KeyError,
-                IndexError,
-                UnsupportedDocumentError,
-            ):
-                page_text = str(values["text"])
+            # PDFs are read-only reference/mirror sources (AGENTS.md): only
+            # the file itself changing can invalidate a stored span, so a
+            # cheap hash check (never a re-extraction) is enough, and
+            # validate_location later recomputes span_hash the same way
+            # (_reconstruct_pdf_pages) so the two never disagree over a
+            # pypdf non-determinism (F-paper-4).
+            self._ensure_pdf_current(path)
+            page_text = self._reconstruct_pdf_pages(path).get(
+                page, str(values["text"])
+            )
             return SourceLocation(
                 path,
                 str(values["breadcrumb"]),
@@ -179,11 +322,28 @@ class RetrievalService:
             merged["format"] = document["format"]
         return self._location_for_row(merged)
 
-    def _breadcrumb_for_line(self, path: str, line: int) -> str:
-        for row in self.store.chunks(path):
-            if int(row["start_line"]) <= line <= int(row["end_line"]):
-                return str(row["breadcrumb"])
-        return ""
+    def _breadcrumb_index(self, path: str) -> tuple[list[int], list[tuple[int, str]]]:
+        """One DB read per document: (sorted start_lines, [(end_line, breadcrumb)])."""
+        entries = sorted(
+            (
+                (int(row["start_line"]), int(row["end_line"]), str(row["breadcrumb"]))
+                for row in self.store.chunks(path)
+            )
+        )
+        starts = [entry[0] for entry in entries]
+        rest = [(entry[1], entry[2]) for entry in entries]
+        return starts, rest
+
+    @staticmethod
+    def _breadcrumb_for_line(
+        index: tuple[list[int], list[tuple[int, str]]], line: int
+    ) -> str:
+        starts, rest = index
+        pos = bisect.bisect_right(starts, line) - 1
+        if pos < 0:
+            return ""
+        end_line, breadcrumb = rest[pos]
+        return breadcrumb if line <= end_line else ""
 
     def validate_location(self, location: SourceLocation) -> SourceLocation:
         """Validate revision, line/page range, and exact span content."""
@@ -191,30 +351,30 @@ class RetrievalService:
         path = Path(canonical_path(location.path))
         if not path.exists() or not path.is_file():
             raise StaleSourceError(f"source no longer exists: {path}")
-        data = path.read_bytes()
-        current_hash = hashlib.sha256(data).hexdigest()
-        if location.file_hash and current_hash != location.file_hash:
-            raise StaleSourceError(f"source revision changed: {path}")
-        document = self.store.document(str(path))
-        if document is not None:
-            current_role = str(document["role"])
-            current_format = str(document["format"])
-        else:
-            current_role, _, _ = infer_role(
-                path, source_format(path), root=self.indexer.root
-            )
-            current_format = source_format(path) or location.format
         if location.format == "pdf" or path.suffix.lower() == ".pdf":
-            parsed = parse_file(path)
+            # PDFs are always read-only reference/mirror sources (AGENTS.md):
+            # only the file itself changing can invalidate a stored span, so
+            # this never re-extracts text (F-paper-4: pypdf extraction is
+            # both the slow part and, on pathological PDFs, not stable
+            # across process runs -- re-extracting to "validate" was itself
+            # a source of false staleness).
+            current_hash = self._ensure_pdf_current(str(path))
+            if location.file_hash and current_hash != location.file_hash:
+                raise StaleSourceError(f"source revision changed: {path}")
+            document = self.store.document(str(path))
+            if document is None:
+                raise StaleSourceError(f"source no longer indexed: {path}")
+            current_role = str(document["role"])
+            pages = self._reconstruct_pdf_pages(str(path))
             if (
                 location.page is None
                 or location.page < 1
-                or location.page > len(parsed.pages)
+                or location.page > len(pages)
             ):
                 raise StaleSourceError(
                     f"PDF page is outside the current document: {path}"
                 )
-            page_text = parsed.pages[location.page - 1]
+            page_text = pages.get(location.page, "")
             page_hash = _span_hash(page_text)
             if location.span_hash and page_hash != location.span_hash:
                 raise StaleSourceError(
@@ -230,6 +390,19 @@ class RetrievalService:
                 role=current_role,
                 format="pdf",
             )
+        data = path.read_bytes()
+        current_hash = hashlib.sha256(data).hexdigest()
+        if location.file_hash and current_hash != location.file_hash:
+            raise StaleSourceError(f"source revision changed: {path}")
+        document = self.store.document(str(path))
+        if document is not None:
+            current_role = str(document["role"])
+            current_format = str(document["format"])
+        else:
+            current_role, _, _ = infer_role(
+                path, source_format(path), root=self.indexer.root
+            )
+            current_format = source_format(path) or location.format
         text = data.decode("utf-8", errors="replace")
         if location.start_line is None or location.end_line is None:
             raise ValidationError(
@@ -396,9 +569,12 @@ class RetrievalService:
             raise ValueError("find mode must be literal or regex")
         if pattern == "":
             raise ValueError("find pattern must not be empty")
-        expression = re.compile(
-            re.escape(pattern) if mode == "literal" else pattern, re.MULTILINE
-        )
+        try:
+            expression = re.compile(
+                re.escape(pattern) if mode == "literal" else pattern, re.MULTILINE
+            )
+        except re.error as exc:
+            raise ValidationError(f"invalid find pattern: {exc}") from exc
         role_filter = set(source_roles or roles or ())
         scope_prefix = (
             canonical_path(scope, base=self.indexer.root) if scope else None
@@ -413,20 +589,13 @@ class RetrievalService:
             ):
                 continue
             if row["format"] == "pdf":
-                try:
-                    parsed = parse_file(path)
-                    pages = parsed.pages
-                except (
-                    OSError,
-                    RuntimeError,
-                    TypeError,
-                    ValueError,
-                    KeyError,
-                    IndexError,
-                    UnsupportedDocumentError,
-                ):
-                    pages = []
-                for page_number, page_text in enumerate(pages, start=1):
+                # ``_reconcile_freshness`` already guarantees this row is
+                # current; reconstruct page text from stored chunks instead
+                # of re-invoking pypdf here (F-find-1: the previous version
+                # re-extracted every PDF's text on every find() call).
+                pages = self._reconstruct_pdf_pages(path)
+                for page_number in sorted(pages):
+                    page_text = pages[page_number]
                     for match in expression.finditer(page_text):
                         line_text, snippet, start_col, end_col = _pdf_match_fields(
                             page_text, match
@@ -451,15 +620,28 @@ class RetrievalService:
                         )
                 continue
             text = row["content"]
+            breadcrumb_index: tuple[list[int], list[tuple[int, str]]] | None = None
+            line_index: _LineIndex | None = None
             for match in expression.finditer(text):
-                start_line = _line_for_offset(text, match.start())
-                end_line = _line_for_offset(text, max(match.start(), match.end() - 1))
-                exact = span_text(text, start_line, end_line)
+                if line_index is None:
+                    # Built once per document: turns each match's line/column
+                    # lookup and exact-span slice into O(log lines) instead of
+                    # rescanning the whole document per match (the old
+                    # ``text.count``/``splitlines()``/``rfind`` calls here made
+                    # a large-match-count find() quadratic in file size).
+                    line_index = _LineIndex(text)
+                start_line = line_index.line_for_offset(match.start())
+                end_line = line_index.line_for_offset(
+                    max(match.start(), match.end() - 1)
+                )
+                exact = line_index.span(start_line, end_line)
+                if breadcrumb_index is None:
+                    breadcrumb_index = self._breadcrumb_index(path)
                 results.append(
                     FindResult(
                         SourceLocation(
                             path,
-                            self._breadcrumb_for_line(path, start_line),
+                            self._breadcrumb_for_line(breadcrumb_index, start_line),
                             start_line,
                             end_line,
                             None,
@@ -471,8 +653,10 @@ class RetrievalService:
                         ),
                         match.group(0),
                         exact,
-                        match.start() - text.rfind("\n", 0, match.start()),
-                        match.end() - text.rfind("\n", 0, match.end()),
+                        match.start() - line_index.line_start_offset(start_line),
+                        match.end() - line_index.line_start_offset(
+                            line_index.line_for_offset(match.end())
+                        ),
                     )
                 )
         results.sort(
@@ -538,26 +722,29 @@ class RetrievalService:
         else:
             role = row["role"]
             fmt = row["format"]
-        parsed = parse_file(canonical)
         if fmt == "pdf":
+            # Stored text, never a live re-extraction (F-paper-4): the row
+            # is already fresh via _reconcile_freshness above.
+            pages = self._reconstruct_pdf_pages(canonical)
             if page is None:
-                content = parsed.text
+                content = str(row["content"])
                 selected_page = None
-            elif page < 1 or page > len(parsed.pages):
+            elif page < 1 or page > len(pages):
                 raise ValueError("PDF page is outside the document")
             else:
-                content = parsed.pages[page - 1]
+                content = pages.get(page, "")
                 selected_page = page
             return ReadResult(
                 canonical,
                 content,
                 page=selected_page,
-                file_hash=parsed.file_hash,
+                file_hash=str(row["file_hash"]),
                 role=role,
                 format="pdf",
             )
         if page is not None:
             raise ValueError("page is only valid for PDF sources")
+        parsed = parse_file(canonical)
         lines = parsed.text.splitlines()
         if not lines and start_line is None and end_line is None:
             return ReadResult(

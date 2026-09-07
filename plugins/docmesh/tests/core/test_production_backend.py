@@ -6,9 +6,10 @@ from pathlib import Path
 import pytest
 
 from docmesh import api
-from docmesh.config import initialize_project
+from docmesh.config import initialize_project, manifest_to_toml
 from docmesh.embeddings import FastEmbedBackend
 from docmesh.index import Indexer, SQLiteIndex
+from docmesh.models import Manifest
 
 INDEX_MODULE = importlib.import_module("docmesh.index")
 
@@ -125,6 +126,10 @@ def test_status_and_doctor_do_not_load_the_model(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     (tmp_path / "guide.md").write_text("# Guide\nOffline status.", encoding="utf-8")
+    (tmp_path / ".docmesh").mkdir()
+    (tmp_path / ".docmesh" / "manifest.toml").write_text(
+        manifest_to_toml(Manifest(str(tmp_path))), encoding="utf-8"
+    )
 
     def _must_not_load(*args: object, **kwargs: object):
         raise AssertionError("status/doctor must not construct FastEmbed")

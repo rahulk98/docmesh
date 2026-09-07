@@ -99,8 +99,100 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(value["trusted_metadata"]["result"]["path"], "/tmp/a.md")
         self.assertEqual(value["trusted_metadata"]["metadata"]["cursor"], "next")
         self.assertNotIn("content", json.dumps(value["trusted_metadata"]))
+        # F-mcp-2: a heading/breadcrumb is document-derived text, not control
+        # metadata, so it must land in untrusted_document_content too.
+        self.assertNotIn("breadcrumb", value["trusted_metadata"]["result"]["document"])
         contents = {item["value"] for item in value["untrusted_document_content"]}
-        self.assertEqual(contents, {"first", "second"})
+        self.assertEqual(contents, {"first", "second", "Guide"})
+
+
+class ToolSchemaTests(unittest.TestCase):
+    def test_every_tool_schema_declares_properties_and_required(self) -> None:
+        sys.path.insert(0, str(SERVER.parent))
+        import mcp_server  # type: ignore
+
+        for tool in mcp_server.tool_definitions():
+            schema = tool["inputSchema"]
+            self.assertEqual(schema["type"], "object")
+            self.assertIn("properties", schema)
+            self.assertIn("required", schema)
+        find_schema = next(
+            t for t in mcp_server.tool_definitions() if t["name"] == "find"
+        )
+        self.assertEqual(find_schema["inputSchema"]["required"], ["pattern"])
+
+    def test_cursor_guidance_only_on_tools_with_a_cursor_property(self) -> None:
+        # F-mcp-6: every tool description used to tell the agent to pass
+        # `cursor` on truncation, but only find/impact_page accept one.
+        sys.path.insert(0, str(SERVER.parent))
+        import mcp_server  # type: ignore
+
+        for tool in mcp_server.tool_definitions():
+            if "`cursor`" in tool["description"]:
+                self.assertIn(
+                    "cursor",
+                    tool["inputSchema"]["properties"],
+                    f"{tool['name']} description mentions cursor but its "
+                    "schema has no cursor property",
+                )
+
+    def test_wrong_type_argument_is_a_structured_error_not_a_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            requests = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "search", "arguments": {"limit": "not-a-number"}},
+                },
+            ]
+            result = subprocess.run(
+                [sys.executable, str(SERVER)],
+                input="\n".join(json.dumps(item) for item in requests) + "\n",
+                text=True,
+                capture_output=True,
+                cwd=directory,
+                env={**os.environ, "DOCMESH_NO_RECONCILE": "1"},
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            responses = [json.loads(line) for line in result.stdout.splitlines()]
+            call_response = responses[1]["result"]
+            self.assertTrue(call_response["isError"])
+            payload = json.loads(call_response["content"][0]["text"])
+            self.assertEqual(
+                payload["trusted_metadata"]["error_type"], "SchemaValidationError"
+            )
+
+    def test_missing_required_argument_is_a_structured_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            requests = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "find", "arguments": {}},
+                },
+            ]
+            result = subprocess.run(
+                [sys.executable, str(SERVER)],
+                input="\n".join(json.dumps(item) for item in requests) + "\n",
+                text=True,
+                capture_output=True,
+                cwd=directory,
+                env={**os.environ, "DOCMESH_NO_RECONCILE": "1"},
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            responses = [json.loads(line) for line in result.stdout.splitlines()]
+            call_response = responses[1]["result"]
+            self.assertTrue(call_response["isError"])
+            payload = json.loads(call_response["content"][0]["text"])
+            self.assertEqual(
+                payload["trusted_metadata"]["error_type"], "SchemaValidationError"
+            )
 
 
 class ResultBudgetTests(unittest.TestCase):
@@ -140,16 +232,33 @@ class ResultBudgetTests(unittest.TestCase):
         sys.path.insert(0, str(SERVER.parent))
         import mcp_server  # type: ignore
 
-        value = {"trusted_metadata": {"items": [{"path": f"doc-{i}"} for i in range(50)]}}
-        os.environ["DOCMESH_MAX_RESULT_CHARS"] = "200"
+        value = {"trusted_metadata": {"items": [{"path": f"doc-{i}"} for i in range(2000)]}}
+        os.environ["DOCMESH_MAX_RESULT_CHARS"] = "500"
         try:
             result = mcp_server.enforce_result_budget(value)
         finally:
             del os.environ["DOCMESH_MAX_RESULT_CHARS"]
+        # 500 is below MIN_RESULT_CHARS (F-mcp-3): clamped up, not honored verbatim.
         self.assertLessEqual(
-            len(json.dumps(result, ensure_ascii=False, sort_keys=True)), 200 + 300
+            len(json.dumps(result, ensure_ascii=False, sort_keys=True)),
+            mcp_server.MIN_RESULT_CHARS + 500,
         )
         self.assertTrue(result["truncated"])
+        self.assertTrue(result["budget_clamped"])
+        self.assertIn("budget_warning", result)
+
+    def test_non_numeric_env_override_warns_and_falls_back(self) -> None:
+        sys.path.insert(0, str(SERVER.parent))
+        import mcp_server  # type: ignore
+
+        value = {"trusted_metadata": {"path": "guide.md"}}
+        os.environ["DOCMESH_MAX_RESULT_CHARS"] = "abc"
+        try:
+            result = mcp_server.enforce_result_budget(value)
+        finally:
+            del os.environ["DOCMESH_MAX_RESULT_CHARS"]
+        self.assertTrue(result["budget_clamped"])
+        self.assertIn("budget_warning", result)
 
 
 class StaleServerDetectionTests(unittest.TestCase):
@@ -159,14 +268,14 @@ class StaleServerDetectionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory) / "docmesh" / "docmesh"
-            for version in ("1.0.3", "1.2.0", "1.0.5"):
+            for version in ("1.0.3", "9.9.9", "1.0.5"):
                 (cache / version).mkdir(parents=True)
             original = mcp_server.PLUGIN_CACHE_GLOBS
             mcp_server.PLUGIN_CACHE_GLOBS = (str(cache / "*"),)
             try:
-                self.assertEqual(mcp_server._newest_installed_version(), "1.2.0")
+                self.assertEqual(mcp_server._newest_installed_version(), "9.9.9")
                 self.assertGreater(
-                    mcp_server._version_tuple("1.2.0"),
+                    mcp_server._version_tuple("9.9.9"),
                     mcp_server._version_tuple(mcp_server.SERVER_VERSION),
                 )
             finally:

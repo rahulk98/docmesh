@@ -21,6 +21,7 @@ class ParsedDocument:
     pages: list[str] = field(default_factory=list)
     file_hash: str = ""
     role: str = "editable"
+    warning: str | None = None
 
     @property
     def revision_hash(self) -> str:
@@ -252,10 +253,21 @@ def parse_file(
     if data is None:
         data = path_obj.read_bytes()
     file_hash = hashlib.sha256(data).hexdigest()
+    if fmt != "pdf" and b"\x00" in data[:8192]:
+        # A NUL byte in the first 8KB is grep's own binary heuristic; a binary
+        # file decoded as text produces unusable garbage chunks.
+        raise UnsupportedDocumentError(f"binary file, not indexed: {path_obj}")
     if fmt == "pdf":
         parsed = _parse_pdf(path_obj, data)
     else:
-        text = data.decode("utf-8", errors="replace")
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+            parsed = parse_text(str(path_obj), text, fmt)
+            parsed.warning = "invalid UTF-8, decoded with replacement"
+            parsed.file_hash = file_hash
+            return parsed
         parsed = parse_text(str(path_obj), text, fmt)
     parsed.file_hash = file_hash
     return parsed

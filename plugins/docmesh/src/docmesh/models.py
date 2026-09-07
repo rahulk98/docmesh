@@ -493,6 +493,8 @@ class ImpactCandidate:
     classification: str | None = None
     read: bool = False
     resolved: bool = True
+    match_kind: str = "semantic_only"
+    matched_terms: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -522,6 +524,38 @@ class ImpactPage:
             "cursor": self.cursor,
             "next_cursor": self.next_cursor,
             "page_number": self.page_number,
+        }
+
+
+@dataclass
+class ImpactStartResult:
+    """Boundary-facing impact_start response: counts + first page only.
+
+    Full candidate paging goes through impact_page; this avoids shipping the
+    entire candidate snapshot twice (once here, once via impact_page).
+    """
+
+    run_id: str
+    phase: str
+    status: str
+    source_roles: list[str]
+    page_size: int
+    semantic_limit: int | None
+    counts: dict[str, Any]
+    first_page: ImpactPage
+    metrics: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "status": self.status,
+            "source_roles": list(self.source_roles),
+            "page_size": self.page_size,
+            "semantic_limit": self.semantic_limit,
+            "counts": dict(self.counts),
+            "first_page": self.first_page.to_dict(),
+            "metrics": dict(self.metrics),
         }
 
 
@@ -623,6 +657,7 @@ class IndexStatus:
     model_ready: bool = False
     model_cache_dir: str | None = None
     skipped_documents: list[dict[str, str]] = field(default_factory=list)
+    warnings: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

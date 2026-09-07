@@ -281,12 +281,30 @@ def append_dirty_event(
     """Append a durable dirty-file event and return the exact event record."""
 
     root = project_root(project or (payload or {}).get("cwd"))
-    canonical = sorted(
-        {str(normalise_path(item, root)) for item in paths if is_source_path(item)}
-    )
+    paths_obj = HarnessPaths.for_project(root)
+    accepted: set[str] = set()
+    rejected: list[str] = []
+    for item in paths:
+        if not is_source_path(item):
+            continue
+        resolved = normalise_path(item, root)
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            rejected.append(str(resolved))
+            continue
+        accepted.add(str(resolved))
+    canonical = sorted(accepted)
+    if rejected:
+        paths_obj.ensure()
+        with contextlib.suppress(OSError):
+            with paths_obj.worker_log.open("a", encoding="utf-8") as log:
+                log.write(
+                    f"{utc_now()} DocMesh ignored dirty-event path(s) outside "
+                    f"project root {root}: {rejected}\n"
+                )
     if not canonical:
         raise ValueError("dirty-file event must contain at least one V1 source path")
-    paths_obj = HarnessPaths.for_project(root)
     paths_obj.ensure()
     event: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,

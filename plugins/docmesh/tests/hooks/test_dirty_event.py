@@ -16,13 +16,10 @@ WORKER = ROOT / "plugins" / "docmesh" / "scripts" / "worker.py"
 
 
 class DirtyEventHookTests(unittest.TestCase):
-    def test_hook_durably_records_external_and_project_sources(self) -> None:
+    def test_hook_durably_records_project_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory) / "project"
-            external = Path(directory) / "references" / "source.md"
             project.mkdir()
-            external.parent.mkdir()
-            external.write_text("reference", encoding="utf-8")
             source = project / "README.md"
             source.write_text("editable", encoding="utf-8")
             payload = {
@@ -30,7 +27,6 @@ class DirtyEventHookTests(unittest.TestCase):
                 "cwd": str(project),
                 "tool_name": "Edit",
                 "tool_input": {"file_path": str(source)},
-                "tool_response": {"path": str(external)},
             }
             env = {
                 "DOCMESH_NO_WORKER": "1",
@@ -56,12 +52,40 @@ class DirtyEventHookTests(unittest.TestCase):
             event = events[0]
             self.assertEqual(event["schema_version"], 1)
             self.assertEqual(event["event_type"], "dirty_files")
-            self.assertEqual(
-                event["files"],
-                sorted({str(source.resolve()), str(external.resolve())}),
-            )
+            self.assertEqual(event["files"], [str(source.resolve())])
             self.assertTrue(event["event_id"])
             self.assertTrue(event["durability"]["fsynced"])
+
+    def test_hook_ignores_paths_outside_project_root(self) -> None:
+        # F-ops-1: a hook payload naming a path outside the project (but with
+        # a recognized suffix) must not be queued into this project's DB.
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "project"
+            outside = Path(directory) / "outside" / "notes.md"
+            project.mkdir()
+            outside.parent.mkdir()
+            outside.write_text("not part of this project", encoding="utf-8")
+            payload = {
+                "hook_event_name": "PostToolUse",
+                "cwd": str(project),
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(outside)},
+            }
+            result = subprocess.run(
+                [sys.executable, str(HOOK)],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                cwd=project,
+                env={**__import__("os").environ, "DOCMESH_NO_WORKER": "1"},
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            queue = project / ".docmesh" / "harness" / "dirty-events.jsonl"
+            self.assertFalse(queue.is_file())
+            worker_log = project / ".docmesh" / "harness" / "worker.log"
+            self.assertTrue(worker_log.is_file())
+            self.assertIn("outside project root", worker_log.read_text(encoding="utf-8"))
 
     def test_hook_is_idempotently_empty_for_non_document_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

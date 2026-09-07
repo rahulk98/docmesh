@@ -18,8 +18,31 @@ from .config import (
 from .embeddings import DeterministicEmbedder, FastEmbedBackend
 from .impact import ImpactEngine
 from .index import Indexer
-from .models import ImpactQueryBundle, SearchMetrics
+from .models import DocMeshError, ImpactQueryBundle, ImpactStartResult, SearchMetrics
 from .retrieval import RetrievalService
+
+
+def _resolve_existing_project(root: str | Path) -> Path:
+    """Resolve a project root without ever creating ``.docmesh``.
+
+    Only ``setup``/``init`` are allowed to create a project (they call
+    ``discover_corpus``/``initialize_project`` directly, never this helper).
+    Every other operation must fail with a structured error instead of
+    silently creating ``.docmesh`` and indexing an unrelated directory.
+    """
+
+    resolved = Path(root).expanduser().resolve(strict=False)
+    if resolved.is_file():
+        raise DocMeshError(
+            f"not a DocMesh project: {resolved} is a file, not a directory"
+        )
+    manifest_path = resolved / ".docmesh" / "manifest.toml"
+    if not manifest_path.is_file():
+        raise DocMeshError(
+            f"not a DocMesh project: {resolved} has no .docmesh/manifest.toml; "
+            "run setup"
+        )
+    return resolved
 
 
 def _indexer(
@@ -30,9 +53,15 @@ def _indexer(
     load_model: bool = True,
     local_files_only: bool = True,
     cache_dir: str | Path | None = None,
+    require_project: bool = True,
 ) -> Indexer:
+    root = (
+        _resolve_existing_project(project_root)
+        if require_project
+        else Path(project_root).expanduser().resolve(strict=False)
+    )
     return Indexer(
-        project_root,
+        root,
         db_path=db_path,
         embedder=embedder,  # type: ignore[arg-type]
         load_model=load_model,
@@ -140,7 +169,12 @@ def status(
 def doctor(project_root: str | Path = ".", **kwargs: Any) -> Mapping[str, Any]:
     # Doctor only probes installed modules and the project-local readiness
     # marker; it must not import/construct a model or trigger a download.
-    worker = _indexer(project_root, db_path=kwargs.get("db_path"), load_model=False)
+    worker = _indexer(
+        project_root,
+        db_path=kwargs.get("db_path"),
+        load_model=False,
+        require_project=False,
+    )
     try:
         fts5 = False
         try:
@@ -313,6 +347,7 @@ def impact_start(
     source_roles: Sequence[str] | None = None,
     page_size: int = 20,
     baseline_run_id: str | None = None,
+    semantic_limit: int | None = 50,
     **kwargs: Any,
 ) -> Any:
     engine = _impact_engine(project_root, kwargs)
@@ -320,8 +355,34 @@ def impact_start(
         bundle = query_bundle
         if isinstance(bundle, Mapping):
             bundle = ImpactQueryBundle.from_mapping(bundle)
-        return engine.impact_start(
-            phase, bundle, source_roles, int(page_size), baseline_run_id
+        limit = kwargs.get("semantic_limit", semantic_limit)
+        run = engine.impact_start(
+            phase,
+            bundle,
+            source_roles,
+            int(page_size),
+            baseline_run_id,
+            semantic_limit=limit,
+        )
+        # Boundary response: run id, counts, and only the first page.  The
+        # engine keeps the full validated candidate snapshot in run.candidates
+        # (baseline semantics are unchanged); impact_page delivers the rest
+        # (F-paper-2 - impact_start used to inline the entire candidate set).
+        first_page = engine.impact_page(run.run_id)
+        return ImpactStartResult(
+            run.run_id,
+            run.phase,
+            run.status,
+            list(run.source_roles),
+            run.page_size,
+            limit,
+            {
+                "total": len(run.candidates),
+                "by_match_kind": run.metrics.get("by_match_kind", {}),
+                "by_role": run.metrics.get("by_role", {}),
+            },
+            first_page,
+            run.metrics,
         )
     finally:
         engine.indexer.store.close()

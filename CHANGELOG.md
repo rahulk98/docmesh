@@ -4,6 +4,69 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
+## [1.2.0] - 2026-09-07
+
+- `find` no longer re-extracts a PDF's text per query and per query-match
+  (F-find-1): PDF page text is reconstructed once from already-stored chunks,
+  and line/column lookups for a match are O(1) per match via a per-document
+  index instead of rescanning the whole document per match (F-find-2). On a
+  453-document corpus, a single-hit `find` dropped from 47s to about 1s, and
+  an 11k-hit `find` dropped from 308s to about 1.2s.
+- Query-time freshness reconciliation only re-checks source files whose mtime
+  is newer than their last index time, instead of reading and hashing every
+  source on every query; a document the indexer already tried and skipped
+  (corrupt/encrypted PDF, binary file) is no longer re-parsed on every
+  subsequent call, only when it changes (F-find-1, F-ops watermark tracking).
+- PDF source spans are revalidated by file hash instead of re-extracting text,
+  since pypdf extraction is not guaranteed deterministic across runs
+  (F-paper-4); this also removes a `StaleSourceError` that a non-deterministic
+  re-extraction could spuriously raise on a form-heavy PDF, and cut
+  reference-scoped impact discovery on such a PDF from a multi-minute hang to
+  about 1s.
+- `find` with an invalid regex pattern now raises a structured
+  `ValidationError` instead of an unhandled `re.error`.
+- Every operation except `setup`/`init` now refuses a project root that has no
+  `.docmesh/manifest.toml` instead of silently creating a new index there.
+- The plugin launcher (`scripts/entrypoint.py`) and the package CLI
+  (`docmesh.cli`) now share one argument spec (`docmesh/argspec.py`), so every
+  flag reachable from the package CLI - including `find --scope` and
+  `bench --queries` - is also reachable from the launcher.
+- MCP: document-derived fields (`breadcrumb`, `snippet`, `line_text`, and
+  more) are classified as `untrusted_document_content` by one shared
+  definition (`scripts/trust.py`, RT-MCP-16) instead of two definitions that
+  could drift; tool `inputSchema`s now declare real properties and `required`
+  lists instead of an open `additionalProperties` bag; a bad tool call
+  argument returns a structured `isError` response instead of crashing
+  (F-mcp-5); each tool's description carries truncation guidance specific to
+  the arguments it actually accepts (F-mcp-6); `DOCMESH_MAX_RESULT_CHARS` is
+  clamped to a minimum of 2000, with `budget_clamped`/`budget_warning` fields
+  set when a non-numeric or too-low value is supplied (F-mcp-3).
+- The post-edit hook now ignores a dirty-file path outside the project root
+  instead of queuing it into that project's index (F-ops-1).
+- `impact_start` now returns candidate counts plus only the first page of
+  results instead of the full candidate set (F-paper-2, 810KB down to 33KB on a
+  real paper); candidates carry
+  `match_kind` (`exact_term`/`alias`/`semantic_only`) and `matched_terms`,
+  pages are ordered exact-term first, and semantic-only candidates (not also
+  matched by an exact term or alias) are capped by `semantic_limit` (default
+  50, with the drop count reported in `metrics`) (F-paper-3).
+- Indexing: the approximate token estimate is floored at `ceil(chars/4)` so an
+  unbroken run of word characters can no longer undercount, and such runs are
+  now hard-split so no chunk exceeds the 480-token hard limit (F-parse-3);
+  low-signal chunks (fewer than 8 word tokens, or an alphabetic-character
+  ratio under 0.5) stay stored and FTS-searchable but are excluded from the
+  vector table (F-search-2); a UTF-8 BOM is stripped from text files; invalid
+  UTF-8 is decoded with replacement and recorded as an `IndexStatus` warning
+  instead of silently mangling the text; a binary file with a text extension
+  is skipped instead of indexed as garbage; and a stale embedding-strategy
+  marker written by a construction that never rebuilt vectors no longer
+  blocks the real vector rebuild on the next `index()` call.
+- `docmesh-latex-check` skill: added filter rules to drop `find` matches that
+  fall inside a macro definition (`\newcommand`, `\renewcommand`,
+  `\providecommand`, `\def`, `\let`), a LaTeX comment, or a
+  `\begin{comment}`/`\iffalse` block, instead of treating them as real
+  `\ref`/`\cite`/`\label` uses.
+
 ## [1.1.1] - 2026-09-03
 
 - `find` no longer returns the entire page text for every PDF match; each

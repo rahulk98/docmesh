@@ -28,48 +28,36 @@ from harness import (
 )
 from worker import run_once
 
+# ``argspec.py`` lives inside the ``docmesh`` package but must not be imported
+# through it: ``docmesh/__init__.py`` imports the core (fastembed et al.),
+# which would break the dependency-free harness contract. Load the module
+# directly by file path instead, bypassing the package ``__init__``.
+import importlib.util as _importlib_util
+
+_ARGSPEC_PATH = SCRIPT_DIR.parent / "src" / "docmesh" / "argspec.py"
+_argspec_spec = _importlib_util.spec_from_file_location(
+    "docmesh_argspec", _ARGSPEC_PATH
+)
+assert _argspec_spec is not None and _argspec_spec.loader is not None
+_argspec = _importlib_util.module_from_spec(_argspec_spec)
+_argspec_spec.loader.exec_module(_argspec)
+add_common_arguments = _argspec.add_common_arguments
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="docmesh", description="DocMesh local retrieval and consistency operations"
     )
     parser.add_argument("operation", nargs="?", default="status")
-    parser.add_argument("--project-root", "--root", default=None)
-    parser.add_argument("--db-path", default=None)
+    add_common_arguments(parser)
+    # Launcher-only flags not part of the shared docmesh.cli operation set.
+    # ``--json`` forces JSON output even for a scalar result; the package CLI
+    # (docmesh.cli) always prints JSON already, so it has no flag for this.
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--approve", action="store_true")
-    parser.add_argument("--detailed", action="store_true")
     parser.add_argument("--runtime", default=None)
     parser.add_argument("--plugin-root", default=None)
     parser.add_argument("--refresh", action="store_true")
-    parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--test-double", action="store_true")
-    parser.add_argument("--use-fastembed", action="store_true")
-    parser.add_argument("--model", default=None)
-    parser.add_argument("--cache-dir", default=None)
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--paths", nargs="*", default=None)
-    parser.add_argument("--query", default=None)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--snippet-only", action="store_true")
-    parser.add_argument("--max-snippet-length", type=int, default=None)
-    parser.add_argument("--pattern", default=None)
-    parser.add_argument("--mode", default=None)
-    parser.add_argument("--cursor", default=None)
-    parser.add_argument("--path", default=None)
-    parser.add_argument("--start-line", type=int, default=None)
-    parser.add_argument("--end-line", type=int, default=None)
-    parser.add_argument("--page", type=int, default=None)
-    parser.add_argument("--phase", default=None)
-    parser.add_argument("--query-bundle", default=None)
-    parser.add_argument("--source-roles", nargs="*", default=None)
-    parser.add_argument("--page-size", type=int, default=None)
-    parser.add_argument("--baseline-run-id", default=None)
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--candidate-id", default=None)
-    parser.add_argument("--context-lines", type=int, default=None)
-    parser.add_argument("--decisions", default=None)
     return parser
 
 
@@ -192,6 +180,19 @@ def execute(args: argparse.Namespace) -> tuple[int, Any]:
         freshness = run_once(root)
 
     arguments = _arguments(args)
+    if operation == "bench":
+        # ``--queries`` is a path to a JSON file of query cases (matches
+        # docmesh.cli's contract); the core `bench` operation itself takes
+        # an already-parsed list.
+        queries_path = arguments.pop("queries", None)
+        if not queries_path:
+            return 1, {"ok": False, "error": "--queries is required for bench"}
+        try:
+            arguments["queries"] = json.loads(
+                Path(queries_path).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as exc:
+            return 1, {"ok": False, "error": f"unable to read --queries: {exc}"}
     # Normalize operation-specific command spelling to the Python API contract.
     if (
         operation == "find"

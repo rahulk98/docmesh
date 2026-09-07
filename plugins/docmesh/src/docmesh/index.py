@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
 
-from .chunking import Chunker, compute_embedding_strategy_id
+from .chunking import Chunker, compute_embedding_strategy_id, is_low_signal_chunk
 from .config import (
     canonical_path,
     discover_corpus,
@@ -463,6 +463,12 @@ class SQLiteIndex:
                     "INSERT INTO chunks_fts(rowid,breadcrumb,text) VALUES(?,?,?)",
                     (chunk_id, chunk.breadcrumb, chunk.text),
                 )
+                if is_low_signal_chunk(chunk.text):
+                    # Stored and FTS-searchable above; a near-empty/degenerate
+                    # chunk (bare axis labels, figure scraps) embeds to a
+                    # spuriously "central" vector that wins unrelated queries,
+                    # so it must not enter the vector table.
+                    continue
                 if isinstance(vector, bytes):
                     blob = vector
                     values = blob_to_vector(blob)
@@ -695,7 +701,13 @@ class Indexer:
                 "",
                 self.strategy_id,
             )
-            if not read_only:
+            # Stamping the new id here, before any rebuild has run, would
+            # orphan the flag: a construction that never reaches index() (a
+            # status/doctor/bench call) would permanently mark the new
+            # strategy as already-applied while vectors stay on the old one.
+            # Persist it only once _refresh_vectors_if_strategy_changed has
+            # actually rewritten the vector tables.
+            if not read_only and not self.strategy_changed:
                 self.store.set_metadata("embedding_strategy_id", self.strategy_id)
         if not read_only:
             self.store.set_metadata("model", backend_model)
@@ -813,7 +825,7 @@ class Indexer:
                 except sqlite3.DatabaseError:
                     self.store._vec_table_name = None
             cursor = self.store.conn.execute(
-                "SELECT id, embedding_input FROM chunks ORDER BY id"
+                "SELECT id, text, embedding_input FROM chunks ORDER BY id"
             )
             inserted = 0
             while True:
@@ -829,6 +841,8 @@ class Indexer:
                         "embedding backend must return one vector per chunk"
                     )
                 for row, vector in zip(batch, vectors):
+                    if is_low_signal_chunk(row["text"]):
+                        continue
                     values = list(vector)
                     self.store.conn.execute(
                         "INSERT INTO vectors(chunk_id,dimensions,vector) VALUES(?,?,?)",
@@ -836,6 +850,11 @@ class Indexer:
                     )
                     self.store._insert_vec(int(row["id"]), values)
                 inserted += len(batch)
+            self.store.conn.execute(
+                "INSERT INTO metadata(key,value) VALUES('embedding_strategy_id',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (self.strategy_id,),
+            )
         self.strategy_changed = False
         return bool(inserted)
 
@@ -857,6 +876,7 @@ class Indexer:
         seen = set()
         chunker = self._chunker()
         skipped: list[dict[str, str]] = []
+        warnings: list[dict[str, str]] = []
         for item in items:
             path = canonical_path(item.path)
             seen.add(path)
@@ -897,6 +917,8 @@ class Indexer:
                     self.store.remove_document(path)
                     changed = True
                 continue
+            if parsed.warning:
+                warnings.append({"path": path, "reason": parsed.warning})
             chunks = chunker.chunk_document(
                 parsed.path, parsed.sections, text_hash=raw_hash
             )
@@ -914,7 +936,7 @@ class Indexer:
             self.store.set_corpus_revision(self._compute_indexed_revision())
         elif not self.store.corpus_revision:
             self.store.set_corpus_revision(self._compute_indexed_revision())
-        return self.status(skipped_documents=skipped)
+        return self.status(skipped_documents=skipped, warnings=warnings)
 
     def reindex_path(self, path: str | Path) -> IndexStatus:
         return self.index(paths=[path], force=True)
@@ -971,7 +993,10 @@ class Indexer:
         }
 
     def status(
-        self, *, skipped_documents: Sequence[dict[str, str]] | None = None
+        self,
+        *,
+        skipped_documents: Sequence[dict[str, str]] | None = None,
+        warnings: Sequence[dict[str, str]] | None = None,
     ) -> IndexStatus:
         stale: list[str] = []
         hashes = self.current_file_hashes()
@@ -995,4 +1020,5 @@ class Indexer:
             ),
             model_cache_dir=str(self.model_cache_dir),
             skipped_documents=list(skipped_documents or []),
+            warnings=list(warnings or []),
         )

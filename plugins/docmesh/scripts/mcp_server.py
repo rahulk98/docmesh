@@ -33,36 +33,42 @@ from harness import (
     record_core_result,
     to_jsonable,
 )
+from trust import is_untrusted_key, tool_input_schema, validate_arguments
 from worker import run_once
 
-SERVER_VERSION = "1.1.1"
+SERVER_VERSION = "1.2.0"
 PLUGIN_CACHE_GLOBS = (
     str(Path.home() / ".claude" / "plugins" / "cache" / "docmesh" / "docmesh" / "*"),
     str(Path.home() / ".codex" / "plugins" / "cache" / "docmesh" / "docmesh" / "*"),
 )
 
-UNTRUSTED_KEYS = frozenset(
-    {
-        "content",
-        "document_content",
-        "extracted_passage",
-        "passage",
-        "snippet",
-        "source_snippet",
-        "text",
-        "untrusted_document_content",
-        "excerpt",
-        "line_text",
-        "match",
-    }
-)
 DEFAULT_MAX_RESULT_CHARS = 16000
+# Below this, one minimal search hit plus truncation markers no longer fits
+# (F-mcp-3): a smaller requested budget can never be honored, so clamp to it.
+MIN_RESULT_CHARS = 2000
 
 
-def _max_result_chars() -> int:
-    with contextlib.suppress(TypeError, ValueError):
-        return int(os.environ.get("DOCMESH_MAX_RESULT_CHARS", DEFAULT_MAX_RESULT_CHARS))
-    return DEFAULT_MAX_RESULT_CHARS
+def _max_result_chars() -> tuple[int, str | None]:
+    """Return ``(budget, warning)``; ``warning`` is set on fallback/clamp."""
+
+    raw = os.environ.get("DOCMESH_MAX_RESULT_CHARS")
+    if raw is None:
+        return DEFAULT_MAX_RESULT_CHARS, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return (
+            DEFAULT_MAX_RESULT_CHARS,
+            f"DOCMESH_MAX_RESULT_CHARS={raw!r} is not an integer; "
+            f"using default {DEFAULT_MAX_RESULT_CHARS}",
+        )
+    if value < MIN_RESULT_CHARS:
+        return (
+            MIN_RESULT_CHARS,
+            f"DOCMESH_MAX_RESULT_CHARS={value} is below the minimum "
+            f"{MIN_RESULT_CHARS}; clamped to {MIN_RESULT_CHARS}",
+        )
+    return value, None
 
 
 def _largest_list(value: Any, path: str = "") -> tuple[list[Any], str] | None:
@@ -113,7 +119,11 @@ _TRUNCATION_NOTE = (
 def enforce_result_budget(value: dict[str, Any]) -> dict[str, Any]:
     """Bound the total serialized size of a tool result deterministically."""
 
-    budget = _max_result_chars()
+    budget, warning = _max_result_chars()
+    if warning:
+        value = dict(value)
+        value["budget_clamped"] = True
+        value["budget_warning"] = warning
     if len(json.dumps(value, ensure_ascii=False, sort_keys=True)) <= budget:
         return value
     omitted: dict[str, int] = {}
@@ -163,15 +173,6 @@ FRESHNESS_OPERATIONS = frozenset(
 )
 
 
-def _is_untrusted_key(value: str) -> bool:
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized in UNTRUSTED_KEYS:
-        return True
-    return normalized.endswith(
-        ("_content", "_snippet", "_passage", "_excerpt", "_line_text")
-    )
-
-
 def _collect_untrusted(value: Any, prefix: str, output: list[dict[str, Any]]) -> None:
     """Flatten every leaf below a document-content field into evidence."""
 
@@ -193,7 +194,7 @@ def _split_record(
     untrusted: list[dict[str, Any]] = []
     for key, item in value.items():
         key_text = str(key)
-        if _is_untrusted_key(key_text):
+        if is_untrusted_key(key_text):
             _collect_untrusted(item, f"{prefix}{key_text}", untrusted)
         elif isinstance(item, Mapping):
             child_metadata, child_untrusted = _split_record(
@@ -245,8 +246,33 @@ def sanitize_result(value: Any) -> dict[str, Any]:
     return {"trusted_metadata": {"value": to_jsonable(value)}}
 
 
+# Truncation advice per tool, matching what that tool's inputSchema actually
+# accepts (F-mcp-6: a blanket "use cursor" line was wrong for tools with no
+# cursor property, e.g. search). Tools with no size-limiting arguments get no
+# advice at all rather than a misleading one.
+_TRUNCATION_ADVICE: dict[str, str] = {
+    "search": (
+        " If `truncated` is set on the result, it was cut to fit the output "
+        "budget: pass a smaller `limit`, narrow the query, or set "
+        "`snippet_only`/`max_snippet_length`."
+    ),
+    "find": (
+        " If `truncated` is set on the result, it was cut to fit the output "
+        "budget: pass `scope` to restrict to a subtree, narrow `pattern`, or "
+        "use `cursor` to fetch the rest."
+    ),
+    "read": (
+        " If `truncated` is set on the result, it was cut to fit the output "
+        "budget: pass a narrower `start_line`/`end_line` range or `page`."
+    ),
+    "impact_page": (
+        " If `truncated` is set on the result, it was cut to fit the output "
+        "budget: use `cursor` to fetch the rest."
+    ),
+}
+
+
 def tool_definitions() -> list[dict[str, Any]]:
-    common = {"type": "object", "additionalProperties": True}
     definitions = [
         (
             "setup",
@@ -279,7 +305,11 @@ def tool_definitions() -> list[dict[str, Any]]:
         ),
     ]
     return [
-        {"name": name, "description": description, "inputSchema": common}
+        {
+            "name": name,
+            "description": description + _TRUNCATION_ADVICE.get(name, ""),
+            "inputSchema": tool_input_schema(name),
+        }
         for name, description in definitions
     ]
 
@@ -434,6 +464,26 @@ def handle_request(request: Mapping[str, Any]) -> dict[str, Any] | None:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {"code": -32602, "message": f"unknown DocMesh tool: {name}"},
+            }
+        schema_error = validate_arguments(name, dict(arguments))
+        if schema_error is not None:
+            error = {"error": schema_error, "error_type": "SchemaValidationError"}
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {"trusted_metadata": error},
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                },
             }
         ok, value = _tool_call(name, arguments)
         return {
