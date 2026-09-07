@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Mapping, Sequence
@@ -37,7 +38,7 @@ from .models import (
     ModelNotInstalledError,
     UnsupportedDocumentError,
 )
-from .parsing import ParsedDocument, parse_file
+from .parsing import ParsedDocument, parse_file, write_pdf_mirror
 
 _logger = logging.getLogger("docmesh.index")
 
@@ -49,6 +50,8 @@ FTS_SYNC_VERSION = "1"
 # activations (5351 chunks -> ~4GB as a single call). 64 keeps the peak
 # around ~50MB regardless of corpus or document size.
 EMBED_BATCH_SIZE = 64
+
+_PAGE_HEADING = re.compile(r"^Page (\d+)$")
 
 
 class ChangedFiles(TypedDict):
@@ -240,7 +243,8 @@ class SQLiteIndex:
                 content TEXT NOT NULL,
                 file_hash TEXT NOT NULL,
                 indexed_at REAL NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
+                active INTEGER NOT NULL DEFAULT 1,
+                generated_from TEXT
             );
             CREATE TABLE IF NOT EXISTS chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -275,6 +279,10 @@ class SQLiteIndex:
             );
             """
         )
+        try:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN generated_from TEXT")
+        except sqlite3.DatabaseError:
+            pass  # already present on a fresh CREATE TABLE
         self.set_metadata_default("schema_version", SCHEMA_VERSION)
         self.set_metadata_default("edit_generation", "0")
         self.set_metadata_default("corpus_revision", "")
@@ -367,9 +375,17 @@ class SQLiteIndex:
         """Lightweight rows for hash comparisons without full document text."""
         return list(
             self.conn.execute(
-                "SELECT path, role, format, file_hash FROM documents WHERE active=1 ORDER BY path"
+                "SELECT path, role, format, file_hash, generated_from FROM documents WHERE active=1 ORDER BY path"
             )
         )
+
+    def mirror_for(self, pdf_path: str) -> sqlite3.Row | None:
+        """The mirror document row generated from a given PDF path, if any."""
+
+        return self.conn.execute(
+            "SELECT * FROM documents WHERE generated_from=? AND active=1",
+            (canonical_path(pdf_path),),
+        ).fetchone()
 
     def count_documents(self) -> int:
         row = self.conn.execute(
@@ -424,8 +440,8 @@ class SQLiteIndex:
             )
             self.conn.execute("DELETE FROM chunks WHERE document_path=?", (path,))
             self.conn.execute(
-                "INSERT INTO documents(path,role,format,content,file_hash,indexed_at,active) VALUES(?,?,?,?,?,?,1) "
-                "ON CONFLICT(path) DO UPDATE SET role=excluded.role, format=excluded.format, content=excluded.content, file_hash=excluded.file_hash, indexed_at=excluded.indexed_at, active=1",
+                "INSERT INTO documents(path,role,format,content,file_hash,indexed_at,active,generated_from) VALUES(?,?,?,?,?,?,1,?) "
+                "ON CONFLICT(path) DO UPDATE SET role=excluded.role, format=excluded.format, content=excluded.content, file_hash=excluded.file_hash, indexed_at=excluded.indexed_at, active=1, generated_from=excluded.generated_from",
                 (
                     path,
                     getattr(parsed, "role", "editable"),
@@ -433,6 +449,7 @@ class SQLiteIndex:
                     parsed.text,
                     parsed.file_hash,
                     time.time(),
+                    getattr(parsed, "generated_from", None),
                 ),
             )
             for chunk, vector in zip(chunks, vectors):
@@ -797,6 +814,76 @@ class Indexer:
             blobs.extend(vector_to_blob(list(embedding)) for embedding in vectors)
         return blobs
 
+    def _mirror_relative(self, pdf_path: str | Path) -> str:
+        canonical = Path(canonical_path(pdf_path))
+        try:
+            return canonical.relative_to(self.root).as_posix()
+        except ValueError:
+            return canonical.name
+
+    def _mirror_path(self, pdf_path: str | Path) -> Path:
+        return self.root / ".docmesh" / "mirrors" / (
+            self._mirror_relative(pdf_path) + ".md"
+        )
+
+    @staticmethod
+    def _annotate_mirror_pages(sections: Sequence) -> None:
+        for section in sections:
+            if section.breadcrumb:
+                match = _PAGE_HEADING.match(section.breadcrumb[-1])
+                if match:
+                    section.page = int(match.group(1))
+
+    def _index_pdf(
+        self,
+        item: DiscoveryItem,
+        path: str,
+        mirror_path: Path,
+        raw: bytes,
+        raw_hash: str,
+        chunker: Chunker,
+    ) -> None:
+        """Regenerate the PDF's mirror (if stale) and index the mirror only.
+
+        The PDF itself gets a chunkless placeholder document row (so
+        discovery/staleness bookkeeping still sees it); only the mirror is
+        chunked, embedded, and searchable.
+        """
+
+        rel = self._mirror_relative(path)
+        write_pdf_mirror(Path(path), mirror_path, raw, rel_path=rel)
+        placeholder = ParsedDocument(
+            path=path, format="pdf", text="", file_hash=raw_hash, role=item.role
+        )
+        self.store.replace_document(placeholder, [], [])
+        mirror_data = mirror_path.read_bytes()
+        mirror_parsed = parse_file(mirror_path, data=mirror_data)
+        mirror_parsed.role = "mirror"
+        mirror_parsed.generated_from = path
+        self._annotate_mirror_pages(mirror_parsed.sections)
+        mirror_chunks = chunker.chunk_document(
+            mirror_parsed.path, mirror_parsed.sections, text_hash=mirror_parsed.file_hash
+        )
+        mirror_vectors = self._embed_chunk_batches(mirror_chunks)
+        self.store.replace_document(mirror_parsed, mirror_chunks, mirror_vectors)
+
+    def _remove_document_and_mirror(self, path: str) -> None:
+        row = self.store.document(path)
+        if row is not None and str(row["format"]) == "pdf":
+            mirror_row = self.store.mirror_for(path)
+            mirror_path = (
+                Path(str(mirror_row["path"]))
+                if mirror_row is not None
+                else self._mirror_path(path)
+            )
+            if mirror_row is not None:
+                self.store.remove_document(str(mirror_path))
+            try:
+                mirror_path.unlink()
+            except OSError:
+                pass
+        self.store.remove_document(path)
+
     def _current_discovery(self) -> list[DiscoveryItem]:
         report = discover_corpus(
             self.root,
@@ -880,27 +967,48 @@ class Indexer:
         for item in items:
             path = canonical_path(item.path)
             seen.add(path)
+            is_pdf = item.format == "pdf"
+            mirror_path = self._mirror_path(path) if is_pdf else None
+            if mirror_path is not None:
+                # A PDF's mirror is attached by the indexer, not discovered
+                # (``.docmesh/**`` stays excluded from discovery); it must
+                # survive the orphan sweep below as long as the PDF is still
+                # a current item, regardless of whether this pass touches it.
+                seen.add(canonical_path(mirror_path))
             if not Path(path).exists():
                 if self.store.document(path):
-                    self.store.remove_document(path)
+                    self._remove_document_and_mirror(path)
                     changed = True
                 continue
             raw = Path(path).read_bytes()
             raw_hash = hashlib.sha256(raw).hexdigest()
             existing = self.store.document(path)
+            mirror_missing = is_pdf and not (mirror_path is not None and mirror_path.exists())
             if (
                 existing is not None
                 and existing["file_hash"] == raw_hash
                 and existing["role"] == item.role
                 and existing["format"] == item.format
                 and not force
+                and not mirror_missing
             ):
                 continue
             # A corrupt/truncated/unparseable source (a truncated PDF, say)
             # must never abort the whole run.  Warn, drop any stale entry so
             # retrieval cannot return outdated content, and keep indexing.
             try:
-                parsed = self._parse_for_index(item, data=raw)
+                if is_pdf:
+                    assert mirror_path is not None
+                    self._index_pdf(item, path, mirror_path, raw, raw_hash, chunker)
+                else:
+                    parsed = self._parse_for_index(item, data=raw)
+                    if parsed.warning:
+                        warnings.append({"path": path, "reason": parsed.warning})
+                    chunks = chunker.chunk_document(
+                        parsed.path, parsed.sections, text_hash=raw_hash
+                    )
+                    vectors = self._embed_chunk_batches(chunks)
+                    self.store.replace_document(parsed, chunks, vectors)
             except (
                 UnsupportedDocumentError,
                 OSError,
@@ -914,21 +1022,14 @@ class Indexer:
                 reason = str(exc).strip() or type(exc).__name__
                 skipped.append({"path": path, "reason": reason})
                 if self.store.document(path):
-                    self.store.remove_document(path)
+                    self._remove_document_and_mirror(path)
                     changed = True
                 continue
-            if parsed.warning:
-                warnings.append({"path": path, "reason": parsed.warning})
-            chunks = chunker.chunk_document(
-                parsed.path, parsed.sections, text_hash=raw_hash
-            )
-            vectors = self._embed_chunk_batches(chunks)
-            self.store.replace_document(parsed, chunks, vectors)
             changed = True
         if full_scan:
             existing_paths = self.store.document_paths()
             for path in sorted(existing_paths - seen):
-                self.store.remove_document(path)
+                self._remove_document_and_mirror(path)
                 changed = True
         if changed:
             generation = self.store.edit_generation + 1

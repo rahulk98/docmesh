@@ -77,7 +77,8 @@ def test_find_does_not_re_extract_an_unchanged_pdf(
 
     results = service.find("NEEDLE_PDF", mode="literal")
     assert len(results) == 1
-    assert results[0].location.format == "pdf"
+    assert results[0].location.format == "markdown"
+    assert results[0].location.generated_from == str((tmp_path / "paper.pdf").resolve())
     assert calls["count"] == 0, "find() must not re-parse an unchanged PDF"
 
 
@@ -124,7 +125,7 @@ def test_find_does_not_reparse_a_skipped_document_on_repeat_queries(
     assert calls["count"] == 0, "an unchanged skipped document must not be reparsed"
 
 
-def test_validate_location_never_reparses_an_unchanged_pdf_but_flags_content_changes(
+def test_validate_location_never_reparses_an_unchanged_pdf_mirror_but_flags_content_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pdf_path = tmp_path / "paper.pdf"
@@ -133,27 +134,30 @@ def test_validate_location_never_reparses_an_unchanged_pdf_but_flags_content_cha
     results = service.search("NEEDLE_PDF", limit=1)
     assert results
     location = results[0].location
+    assert location.format == "markdown"
 
-    import importlib
+    import pypdf
 
-    index_module = importlib.import_module("docmesh.index")
     calls = {"count": 0}
-    original = index_module.parse_file
+    original_pages = pypdf.PdfReader.pages.fget
 
-    def spy(*args, **kwargs):
+    def spy(self):  # pragma: no cover - trivial counter
         calls["count"] += 1
-        return original(*args, **kwargs)
+        return original_pages(self)
 
-    monkeypatch.setattr(index_module, "parse_file", spy)
+    monkeypatch.setattr(pypdf.PdfReader, "pages", property(spy))
 
-    # Unchanged: validated without ever touching the PDF parser.
+    # Unchanged: a mirror is an ordinary text file; validating it never
+    # touches pypdf again.
     validated = service.validate_location(location)
     assert validated.span_hash == location.span_hash
     assert calls["count"] == 0
 
-    # Content actually changes: must be detected as stale (reindexing the
-    # changed file is allowed to call the parser once).
+    # The PDF changes; the mirror is only refreshed on the next index() (a
+    # query alone does not re-extract PDFs), so the stored location goes
+    # stale once that reindex updates the mirror's content.
     pdf_path.write_bytes(_make_pdf("DIFFERENT_TEXT now"))
+    service.indexer.index()
     with pytest.raises(StaleSourceError):
         service.validate_location(location)
 

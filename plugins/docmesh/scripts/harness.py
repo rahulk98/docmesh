@@ -387,6 +387,8 @@ def try_file_lock(path: Path) -> Iterator[bool]:
 def to_jsonable(value: Any) -> Any:
     """Convert core return values to JSON without importing core dependencies."""
 
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        return to_jsonable(value.to_dict())
     if dataclasses.is_dataclass(value):
         return {
             key: to_jsonable(item) for key, item in dataclasses.asdict(value).items()

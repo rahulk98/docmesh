@@ -18,7 +18,15 @@ from .config import (
 from .embeddings import DeterministicEmbedder, FastEmbedBackend
 from .impact import ImpactEngine
 from .index import Indexer
-from .models import DocMeshError, ImpactQueryBundle, ImpactStartResult, SearchMetrics
+from .models import (
+    Baseline,
+    DocMeshError,
+    ImpactClassifyResult,
+    ImpactFinishResult,
+    ImpactQueryBundle,
+    ImpactStartResult,
+    SearchMetrics,
+)
 from .retrieval import RetrievalService
 
 
@@ -356,10 +364,11 @@ def impact_start(
         if isinstance(bundle, Mapping):
             bundle = ImpactQueryBundle.from_mapping(bundle)
         limit = kwargs.get("semantic_limit", semantic_limit)
+        roles = source_roles if source_roles is not None else kwargs.get("roles")
         run = engine.impact_start(
             phase,
             bundle,
-            source_roles,
+            roles,
             int(page_size),
             baseline_run_id,
             semantic_limit=limit,
@@ -389,11 +398,16 @@ def impact_start(
 
 
 def impact_page(
-    project_root: str | Path = ".", run_id: str = "", cursor: Any = None, **kwargs: Any
+    project_root: str | Path = ".",
+    run_id: str = "",
+    cursor: Any = None,
+    page_size: int | None = None,
+    snippet_only: bool = True,
+    **kwargs: Any,
 ) -> Any:
     engine = _impact_engine(project_root, kwargs)
     try:
-        return engine.impact_page(run_id, cursor)
+        return engine.impact_page(run_id, cursor, page_size, snippet_only)
     finally:
         engine.indexer.store.close()
 
@@ -420,7 +434,24 @@ def impact_classify(
 ) -> Any:
     engine = _impact_engine(project_root, kwargs)
     try:
-        return engine.impact_classify(run_id, decisions or {})
+        run = engine.impact_classify(run_id, decisions or {})
+        by_classification: dict[str, int] = {}
+        unclassified: list[str] = []
+        for candidate in run.candidates:
+            if candidate.classification is None:
+                unclassified.append(candidate.candidate_id)
+            else:
+                by_classification[candidate.classification] = (
+                    by_classification.get(candidate.classification, 0) + 1
+                )
+        return ImpactClassifyResult(
+            run.run_id,
+            dict(run.metrics.get("last_classify_call", {})),
+            len(unclassified),
+            by_classification,
+            dict(run.metrics.get("by_match_kind", {})),
+            unclassified[:20],
+        )
     finally:
         engine.indexer.store.close()
 
@@ -430,6 +461,29 @@ def impact_finish(
 ) -> Any:
     engine = _impact_engine(project_root, kwargs)
     try:
-        return engine.impact_finish(run_id)
+        result = engine.impact_finish(run_id)
+        if isinstance(result, Baseline):
+            return ImpactFinishResult(
+                result.baseline_run_id,
+                result.baseline_run_id,
+                "discover",
+                "sealed",
+                list(result.source_roles),
+                dict(result.metrics),
+                {
+                    "count": len(result.edit_inventory),
+                    "paths": list(result.edit_inventory),
+                },
+            )
+        run = result
+        return ImpactFinishResult(
+            run.run_id,
+            run.baseline_run_id,
+            run.phase,
+            run.status,
+            list(run.source_roles),
+            dict(run.metrics),
+            None,
+        )
     finally:
         engine.indexer.store.close()

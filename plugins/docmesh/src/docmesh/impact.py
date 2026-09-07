@@ -109,6 +109,7 @@ class ImpactEngine:
             consumed_pages=[int(item) for item in payload.get("consumed_pages", [])],
             scope_drift=ScopeDrift(**dict(payload.get("scope_drift", {}) or {})),
             metrics=dict(payload.get("metrics", {}) or {}),
+            bulk_selectors=[dict(item) for item in payload.get("bulk_selectors", []) or []],
             created_at=str(payload.get("created_at", "")),
             finished_at=payload.get("finished_at"),
         )
@@ -130,6 +131,7 @@ class ImpactEngine:
             edit_inventory=list(payload.get("edit_inventory", [])),
             file_hashes=dict(payload.get("file_hashes", {}) or {}),
             sealed_at=str(payload.get("sealed_at", "")),
+            metrics=dict(payload.get("metrics", {}) or {}),
         )
 
     @staticmethod
@@ -431,7 +433,16 @@ class ImpactEngine:
         self._persist(run)
         return run
 
-    def impact_page(self, run_id: str, cursor: str | int | None = None) -> ImpactPage:
+    #: hard ceiling on impact_page page_size, matching the output budget.
+    MAX_PAGE_SIZE = 200
+
+    def impact_page(
+        self,
+        run_id: str,
+        cursor: str | int | None = None,
+        page_size: int | None = None,
+        snippet_only: bool = True,
+    ) -> ImpactPage:
         run = self._load_run(run_id)
         if run.status not in ("open", "sealed", "verified"):
             raise ImpactStateError(f"impact run is not readable: {run.status}")
@@ -441,8 +452,12 @@ class ImpactEngine:
             raise ValidationError("invalid impact cursor") from exc
         if offset < 0 or offset > len(run.candidates):
             raise ValidationError("impact cursor is outside candidate snapshot")
-        page_number = offset // run.page_size
-        page_candidates = run.candidates[offset : offset + run.page_size]
+        effective_page_size = run.page_size if page_size is None else int(page_size)
+        if effective_page_size <= 0:
+            raise ValidationError("impact page_size must be positive")
+        effective_page_size = min(effective_page_size, self.MAX_PAGE_SIZE)
+        page_number = offset // effective_page_size
+        page_candidates = run.candidates[offset : offset + effective_page_size]
         for candidate in page_candidates:
             if candidate.candidate_id not in run.seen_candidates:
                 run.seen_candidates.append(candidate.candidate_id)
@@ -463,6 +478,7 @@ class ImpactEngine:
             None if cursor is None else str(cursor),
             next_cursor,
             page_number,
+            bool(snippet_only),
         )
 
     def impact_read(
@@ -510,52 +526,96 @@ class ImpactEngine:
             result.format,
         )
 
+    @staticmethod
+    def _matches_selector(candidate: ImpactCandidate, selector: Mapping[str, Any]) -> bool:
+        match_kinds = selector.get("match_kind")
+        if match_kinds and candidate.match_kind not in match_kinds:
+            return False
+        roles = selector.get("role")
+        if roles and candidate.location.role not in roles:
+            return False
+        path_prefix = selector.get("path_prefix")
+        if path_prefix and not candidate.location.path.startswith(str(path_prefix)):
+            return False
+        return True
+
+    def _apply_classification(
+        self, candidate: ImpactCandidate, classification: str
+    ) -> None:
+        if classification not in ("needs_edit", "consistent", "unrelated", "uncertain"):
+            raise ValidationError(f"invalid impact classification: {classification}")
+        if (
+            candidate.classification == "uncertain"
+            and classification != "uncertain"
+            and not candidate.read
+        ):
+            raise ImpactStateError(
+                f"uncertain candidate {candidate.candidate_id} must be read before reclassification"
+            )
+        candidate.classification = classification
+
     def impact_classify(
         self,
         run_id: str,
         decisions: Mapping[str, str]
-        | Sequence[Mapping[str, str]]
+        | Sequence[Mapping[str, Any]]
         | Sequence[tuple[str, str]],
     ) -> ImpactRun:
         run = self._load_run(run_id)
         if run.status != "open":
             raise ImpactStateError("impact run is sealed and immutable")
-        values: list[tuple[str | None, str | None]] = []
+        known = {candidate.candidate_id: candidate for candidate in run.candidates}
+        explicit: list[tuple[str | None, str | None]] = []
+        selectors: list[dict[str, Any]] = []
         if isinstance(decisions, Mapping):
-            values.extend(decisions.items())
+            explicit.extend(decisions.items())
         else:
             for item in decisions:
-                if isinstance(item, Mapping):
-                    values.append(
+                if isinstance(item, Mapping) and "selector" in item:
+                    selectors.append(dict(item))
+                elif isinstance(item, Mapping):
+                    explicit.append(
                         (
                             item.get("candidate_id"),
                             item.get("classification", item.get("decision")),
                         )
                     )
                 else:
-                    values.append(item)
-        known = {candidate.candidate_id: candidate for candidate in run.candidates}
-        for candidate_id, classification in values:
+                    explicit.append(item)
+
+        # Bulk selectors classify only what is still unclassified; an explicit
+        # per-candidate decision (applied after) always overrides one.
+        bulk_classified_this_call = 0
+        for entry in selectors:
+            selector = entry.get("selector") or {}
+            classification = entry.get("classification")
+            count = 0
+            for candidate in run.candidates:
+                if candidate.classification is not None:
+                    continue
+                if self._matches_selector(candidate, selector):
+                    self._apply_classification(candidate, str(classification))
+                    count += 1
+            run.bulk_selectors.append(
+                {
+                    "selector": dict(selector),
+                    "classification": classification,
+                    "reason": entry.get("reason"),
+                    "classified_count": count,
+                }
+            )
+            bulk_classified_this_call += count
+
+        for candidate_id, classification in explicit:
             if candidate_id is None or candidate_id not in known:
                 raise ValidationError(f"unknown impact candidate: {candidate_id}")
-            if classification is None or classification not in (
-                "needs_edit",
-                "consistent",
-                "unrelated",
-                "uncertain",
-            ):
-                raise ValidationError(
-                    f"invalid impact classification: {classification}"
-                )
-            if (
-                known[candidate_id].classification == "uncertain"
-                and classification != "uncertain"
-                and not known[candidate_id].read
-            ):
-                raise ImpactStateError(
-                    f"uncertain candidate {candidate_id} must be read before reclassification"
-                )
-            known[candidate_id].classification = classification
+            if classification is None:
+                raise ValidationError(f"invalid impact classification: {classification}")
+            self._apply_classification(known[candidate_id], classification)
+        run.metrics["last_classify_call"] = {
+            "explicit_count": len(explicit),
+            "bulk_count": bulk_classified_this_call,
+        }
         self._persist(run)
         return run
 
@@ -594,6 +654,16 @@ class ImpactEngine:
         run.metrics["candidate_relevant_ratio"] = (
             (len(run.candidates) / relevant) if relevant else None
         )
+        by_classification: dict[str, int] = {}
+        by_match_kind_classified: dict[str, dict[str, int]] = {}
+        for candidate in run.candidates:
+            classification = str(candidate.classification)
+            by_classification[classification] = by_classification.get(classification, 0) + 1
+            bucket = by_match_kind_classified.setdefault(candidate.match_kind, {})
+            bucket[classification] = bucket.get(classification, 0) + 1
+        run.metrics["by_classification"] = by_classification
+        run.metrics["by_match_kind_classified"] = by_match_kind_classified
+        run.metrics["bulk_selectors"] = list(run.bulk_selectors)
         if run.phase == "discover":
             inventory = sorted(
                 {
@@ -613,6 +683,7 @@ class ImpactEngine:
                 inventory,
                 self.indexer.current_file_hashes(),
                 _now(),
+                dict(run.metrics),
             )
             self.indexer.store.save_baseline(run.run_id, baseline.to_dict())
             run.status = "sealed"
@@ -641,9 +712,13 @@ def impact_start(indexer: Indexer, **kwargs: Any) -> ImpactRun:
 
 
 def impact_page(
-    indexer: Indexer, run_id: str, cursor: str | int | None = None
+    indexer: Indexer,
+    run_id: str,
+    cursor: str | int | None = None,
+    page_size: int | None = None,
+    snippet_only: bool = True,
 ) -> ImpactPage:
-    return ImpactEngine(indexer).impact_page(run_id, cursor)
+    return ImpactEngine(indexer).impact_page(run_id, cursor, page_size, snippet_only)
 
 
 def impact_read(

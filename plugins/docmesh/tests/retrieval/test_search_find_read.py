@@ -1,11 +1,10 @@
-import re
 from pathlib import Path
 
 from docmesh import api
 from docmesh.embeddings import DeterministicEmbedder
 from docmesh.index import Indexer, SQLiteIndex
 from docmesh.models import Manifest, SourceConfig, ValidationError
-from docmesh.retrieval import RetrievalService, _pdf_match_fields
+from docmesh.retrieval import RetrievalService
 
 
 def test_index_search_find_and_read_use_exact_current_locations(tmp_path: Path) -> None:
@@ -26,20 +25,6 @@ def test_index_search_find_and_read_use_exact_current_locations(tmp_path: Path) 
     assert [match.location.start_line for match in matches] == [2, 3]
     read = service.read("guide.md", start_line=2, end_line=2)
     assert read.content == "The canonical policy applies."
-
-
-def test_pdf_match_fields_return_only_the_matched_line_and_a_bounded_snippet() -> None:
-    filler = "filler text " * 200
-    page_text = f"{filler}\nneedle phrase on its own line\n{filler}"
-    match = next(re.finditer("needle phrase", page_text))
-
-    line_text, snippet, start_col, end_col = _pdf_match_fields(page_text, match)
-
-    assert line_text == "needle phrase on its own line"
-    assert len(snippet) <= 810
-    assert "needle phrase" in snippet
-    assert start_col == 1
-    assert end_col == 1 + len("needle phrase")
 
 
 def test_find_scope_restricts_to_a_subtree_and_respects_path_boundaries(

@@ -40,7 +40,13 @@ Skills define workflow. MCP implements retrieval and state. Hooks provide synchr
 - `.docmesh/manifest.toml` is portable and tracked.
 - `.docmesh/local.toml` is machine-local and ignored. Databases, model state, queues, and logs are ignored.
 - `docmesh init` discovers documents across arbitrary folders, explains inclusions/exclusions, assigns roles, recognizes generated mirrors, estimates setup cost, and requires approval before writing configuration or downloading a model.
-- Source roles are `editable` text sources, `reference` evidence, and generated `mirror` sources. PDFs are reference or mirror sources in V1.
+- Source roles are `editable` text sources, `reference` evidence, and generated `mirror` sources. PDFs are `reference` sources in V1, indexed only through a generated Markdown mirror (role `mirror`); the PDF itself is never chunked.
+
+## PDF mirrors
+
+Each indexed PDF gets a generated Markdown mirror at `<project>/.docmesh/mirrors/<relative pdf path>.md`: a header line recording the PDF's sha256 and page count, then one `## Page N` heading per page holding that page's extracted text (line-end hyphenation joined, runs of blank lines collapsed). The mirror is regenerated only when the PDF's sha256 changes; an unchanged PDF leaves the mirror file (and its mtime) untouched. Extraction and writing stay page-by-page, never materializing the whole document as one string.
+
+The mirror -- not the PDF -- is chunked, embedded, and searched: chunk locations carry real start/end lines in the mirror plus a `page` field derived from the enclosing `## Page N` heading. `find`, `search`, and `read` against a PDF path resolve to its mirror and report both the mirror path and the origin PDF path (`generated_from`). Mirrors are read-only generated sources and are excluded from discovery (`.docmesh/**`); the indexer attaches and removes them directly, including deleting a PDF's mirror and its index rows when the PDF is removed from the corpus.
 
 ## Embedding and chunks
 
@@ -95,12 +101,12 @@ Editable text candidates contain:
 - SHA-256 current-file revision hash;
 - bounded, source-faithful source snippet.
 
-Reference PDF candidates contain:
+Mirror-derived PDF candidates contain:
 
-- normalized absolute canonical path;
-- one-based PDF page number;
-- current document hash;
-- bounded extracted passage.
+- normalized absolute canonical path (the mirror file) and `generated_from` (the origin PDF path);
+- section breadcrumb, one-based inclusive exact start/end lines in the mirror, and the one-based PDF page number;
+- SHA-256 hash of the exact source span and of the mirror's current revision;
+- bounded, source-faithful source snippet.
 
 Validation checks existence, current source revision, line/page validity, and span content. A stale location triggers synchronous targeted reindexing and one resolution retry. If resolution still fails, `impact_start` fails with a stale-source diagnostic; it never silently drops the candidate or returns it as editable. No unresolved or synthetic location appears in an impact page. `impact_read` revalidates the source revision. Corpus mutation after freezing causes finish to reject.
 

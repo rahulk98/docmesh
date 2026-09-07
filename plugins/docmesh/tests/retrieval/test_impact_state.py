@@ -9,7 +9,9 @@ from docmesh.models import (
     CorpusMutationError,
     ImpactQueryBundle,
     ImpactStateError,
+    Manifest,
     SearchResult,
+    SourceConfig,
     SourceLocation,
     ValidationError,
 )
@@ -228,3 +230,155 @@ def test_api_impact_start_returns_only_run_id_counts_and_first_page(
     assert len(payload["first_page"]["candidates"]) <= payload["page_size"]
     if payload["counts"]["total"] > payload["page_size"]:
         assert payload["first_page"]["next_cursor"] is not None
+
+
+def test_default_discovery_roles_exclude_reference_and_widen_on_request(
+    tmp_path: Path,
+) -> None:
+    editable = tmp_path / "editable.md"
+    editable.write_text("# E\nThe safe band term appears here.", encoding="utf-8")
+    reference = tmp_path / "reference.md"
+    reference.write_text("# R\nThe safe band term appears here too.", encoding="utf-8")
+    manifest = Manifest(
+        str(tmp_path),
+        sources=[SourceConfig(str(editable), "editable"), SourceConfig(str(reference), "reference")],
+    )
+    engine = ImpactEngine(
+        Indexer(
+            tmp_path,
+            manifest=manifest,
+            index=SQLiteIndex(":memory:"),
+            embedder=DeterministicEmbedder(32),
+        )
+    )
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle("safe band", exact_terms=["safe band"]),
+        page_size=20,
+    )
+    assert run.source_roles == ["editable"]
+    assert all(c.location.role == "editable" for c in run.candidates)
+
+    run_both = engine.impact_start(
+        query_bundle=ImpactQueryBundle("safe band", exact_terms=["safe band"]),
+        source_roles=["editable", "reference"],
+        page_size=20,
+    )
+    assert set(run_both.source_roles) == {"editable", "reference"}
+    assert any(c.location.role == "reference" for c in run_both.candidates)
+
+
+def test_impact_page_snippet_only_omits_full_text_and_respects_page_size(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle("cache policy", exact_terms=["cache policy"]),
+        page_size=20,
+    )
+    page = engine.impact_page(run.run_id, page_size=1, snippet_only=True)
+    assert page.snippet_only is True
+    assert len(page.candidates) <= 1
+    payload = page.to_dict()
+    for candidate in payload["candidates"]:
+        assert "text" not in candidate
+        assert "retrieval_scores" not in candidate
+        assert {"candidate_id", "path", "match_kind", "matched_terms", "snippet"} <= set(
+            candidate
+        )
+
+    full_page = engine.impact_page(run.run_id, snippet_only=False)
+    full_payload = full_page.to_dict()
+    assert any("text" in candidate for candidate in full_payload["candidates"])
+
+
+def test_impact_classify_selector_bulk_and_explicit_override(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle("cache policy", exact_terms=["cache policy"]),
+        page_size=20,
+    )
+    cursor = None
+    while True:
+        page = engine.impact_page(run.run_id, cursor)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    assert len(run.candidates) >= 2
+    target_id = run.candidates[0].candidate_id
+
+    updated = engine.impact_classify(
+        run.run_id,
+        [
+            {
+                "selector": {"match_kind": ["exact_term"]},
+                "classification": "unrelated",
+                "reason": "peer-paper boilerplate",
+            },
+            {"candidate_id": target_id, "classification": "needs_edit"},
+        ],
+    )
+    by_id = {c.candidate_id: c for c in updated.candidates}
+    # explicit decision always wins over the bulk selector
+    assert by_id[target_id].classification == "needs_edit"
+    assert all(c.classification == "unrelated" for c in updated.candidates if c.candidate_id != target_id)
+    assert len(updated.bulk_selectors) == 1
+    non_target = [c for c in updated.candidates if c.candidate_id != target_id]
+    assert updated.bulk_selectors[0]["classified_count"] == len(non_target) + 1
+
+
+def test_impact_finish_reports_counts_by_classification_and_match_kind(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle("cache policy", exact_terms=["cache policy"]),
+        page_size=20,
+    )
+    cursor = None
+    while True:
+        page = engine.impact_page(run.run_id, cursor)
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    engine.impact_classify(
+        run.run_id, {c.candidate_id: "needs_edit" for c in run.candidates}
+    )
+    baseline = engine.impact_finish(run.run_id)
+    metrics = engine.indexer.store.load_run(run.run_id)["metrics"]
+    assert metrics["by_classification"] == {"needs_edit": len(baseline.candidates)}
+    assert set(metrics["by_match_kind_classified"]) <= {"exact_term", "alias", "semantic_only"}
+
+
+def test_api_impact_classify_and_finish_return_thin_summaries_not_candidates(
+    tmp_path: Path,
+) -> None:
+    from docmesh import api
+
+    (tmp_path / "a.md").write_text(
+        "# A\nThe cache policy is documented here.", encoding="utf-8"
+    )
+    api.setup(project_root=tmp_path, deterministic=True, approve=True)
+    start = api.impact_start(
+        project_root=tmp_path,
+        query_bundle={"canonical_claim": "cache policy", "exact_terms": ["cache policy"]},
+        page_size=20,
+        deterministic=True,
+    )
+    run_id = start.run_id
+    ids = [c.candidate_id for c in start.first_page.candidates]
+    classify = api.impact_classify(
+        project_root=tmp_path,
+        run_id=run_id,
+        decisions={cid: "needs_edit" for cid in ids},
+        deterministic=True,
+    )
+    payload = classify.to_dict()
+    assert "candidates" not in payload
+    assert payload["remaining_unclassified"] == 0
+    assert payload["by_classification"] == {"needs_edit": len(ids)}
+
+    finish = api.impact_finish(project_root=tmp_path, run_id=run_id, deterministic=True)
+    finish_payload = finish.to_dict()
+    assert "candidates" not in finish_payload
+    assert finish_payload["edit_inventory"]["count"] >= 1
+    assert "by_classification" in finish_payload["metrics"]

@@ -262,6 +262,7 @@ class SourceLocation:
     snippet: str = ""
     role: str = "editable"
     format: str = "text"
+    generated_from: str | None = None
 
     @property
     def canonical_path(self) -> str:
@@ -314,7 +315,7 @@ class SourceLocation:
             str(Path(self.path).expanduser().resolve(strict=False)) if self.path else ""
         )
         bounded = self.snippet[:600]
-        if self.format == "pdf" or self.page is not None:
+        if self.format == "pdf" and self.start_line is None:
             value: dict[str, Any] = {
                 "canonical_path": canonical,
                 "section_breadcrumb": self.breadcrumb,
@@ -325,18 +326,23 @@ class SourceLocation:
                 "role": self.role,
                 "format": "pdf" if self.format == "text" else self.format,
             }
+            if self.generated_from:
+                value["generated_from"] = self.generated_from
             return value
         value = {
             "canonical_path": canonical,
             "section_breadcrumb": self.breadcrumb,
             "start_line": self.start_line,
             "end_line": self.end_line,
+            "page_number": self.page,
             "content_hash": self.span_hash,
             "current_file_hash": self.file_hash,
             "source_snippet": bounded,
             "role": self.role,
             "format": self.format,
         }
+        if self.generated_from:
+            value["generated_from"] = self.generated_from
         return value
 
 
@@ -408,6 +414,7 @@ class ReadResult:
     file_hash: str = ""
     role: str = "editable"
     format: str = "text"
+    generated_from: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -502,6 +509,25 @@ class ImpactCandidate:
         value["location"] = self.location.to_dict()
         return value
 
+    def summary_dict(self, snippet_length: int = 160) -> dict[str, Any]:
+        """Page-sized view: no full span/passage text, just enough to triage."""
+
+        snippet = " ".join(self.text.split())
+        if len(snippet) > snippet_length:
+            snippet = snippet[:snippet_length].rstrip() + "..."
+        return {
+            "candidate_id": self.candidate_id,
+            "path": self.location.path,
+            "start_line": self.location.start_line,
+            "end_line": self.location.end_line,
+            "page": self.location.page,
+            "role": self.location.role,
+            "match_kind": self.match_kind,
+            "matched_terms": list(self.matched_terms),
+            "classification": self.classification,
+            "snippet": snippet,
+        }
+
 
 @dataclass
 class ImpactPage:
@@ -513,17 +539,70 @@ class ImpactPage:
     cursor: str | None = None
     next_cursor: str | None = None
     page_number: int = 0
+    snippet_only: bool = True
 
     def to_dict(self) -> dict[str, Any]:
+        candidates = (
+            [candidate.summary_dict() for candidate in self.candidates]
+            if self.snippet_only
+            else [candidate.to_dict() for candidate in self.candidates]
+        )
         return {
             "run_id": self.run_id,
-            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "candidates": candidates,
             "candidate_count": self.candidate_count,
             "returned": self.returned,
             "remaining": self.remaining,
             "cursor": self.cursor,
             "next_cursor": self.next_cursor,
             "page_number": self.page_number,
+            "snippet_only": self.snippet_only,
+        }
+
+
+@dataclass
+class ImpactClassifyResult:
+    """Boundary-facing impact_classify response: counts, not the candidate list."""
+
+    run_id: str
+    classified_this_call: dict[str, int]
+    remaining_unclassified: int
+    by_classification: dict[str, int]
+    by_match_kind: dict[str, int]
+    unclassified_sample: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "classified_this_call": dict(self.classified_this_call),
+            "remaining_unclassified": self.remaining_unclassified,
+            "by_classification": dict(self.by_classification),
+            "by_match_kind": dict(self.by_match_kind),
+            "unclassified_sample": list(self.unclassified_sample),
+        }
+
+
+@dataclass
+class ImpactFinishResult:
+    """Boundary-facing impact_finish response: metrics/summary, not candidates."""
+
+    run_id: str
+    baseline_run_id: str | None
+    phase: str
+    status: str
+    source_roles: list[str]
+    metrics: dict[str, Any]
+    edit_inventory: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "baseline_run_id": self.baseline_run_id,
+            "phase": self.phase,
+            "status": self.status,
+            "source_roles": list(self.source_roles),
+            "metrics": dict(self.metrics),
+            "edit_inventory": self.edit_inventory,
         }
 
 
@@ -583,6 +662,7 @@ class Baseline:
     edit_inventory: list[str]
     file_hashes: dict[str, str]
     sealed_at: str
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -596,6 +676,7 @@ class Baseline:
             "edit_inventory": list(self.edit_inventory),
             "file_hashes": dict(self.file_hashes),
             "sealed_at": self.sealed_at,
+            "metrics": dict(self.metrics),
         }
 
 
@@ -616,6 +697,7 @@ class ImpactRun:
     consumed_pages: list[int] = field(default_factory=list)
     scope_drift: ScopeDrift = field(default_factory=ScopeDrift)
     metrics: dict[str, Any] = field(default_factory=dict)
+    bulk_selectors: list[dict[str, Any]] = field(default_factory=list)
     created_at: str = ""
     finished_at: str | None = None
 
@@ -639,6 +721,7 @@ class ImpactRun:
             "consumed_pages": list(self.consumed_pages),
             "scope_drift": self.scope_drift.to_dict(),
             "metrics": dict(self.metrics),
+            "bulk_selectors": [dict(item) for item in self.bulk_selectors],
             "created_at": self.created_at,
             "finished_at": self.finished_at,
         }

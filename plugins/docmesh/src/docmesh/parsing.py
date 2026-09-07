@@ -22,6 +22,7 @@ class ParsedDocument:
     file_hash: str = ""
     role: str = "editable"
     warning: str | None = None
+    generated_from: str | None = None
 
     @property
     def revision_hash(self) -> str:
@@ -233,6 +234,151 @@ def _parse_pdf(path: Path, data: bytes | None = None) -> ParsedDocument:
     return ParsedDocument(
         canonical_path(path), "pdf", "\n\n".join(pages), sections, pages
     )
+
+
+_MIRROR_FORMAT_VERSION = 2
+
+_MIRROR_HEADER = re.compile(
+    r"^<!-- docmesh mirror of (?P<rel>.*) sha256=(?P<sha>[0-9a-f]{64}) "
+    r"pages=(?P<pages>\d+)(?: format=(?P<format>\d+))? -->$"
+)
+_HYPHEN_JOIN = re.compile(r"(\w+)-$")
+_BLANK_RUN = re.compile(r"\n{3,}")
+# Control characters pypdf can leak into extracted text: NUL and other C0
+# controls (kept: \t, \n) are stripped outright; FF/VT are folded to a
+# newline instead of vanishing so page breaks don't glue words together.
+_CONTROL_STRIP = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
+_CONTROL_TO_NEWLINE = re.compile(r"[\x0b\x0c]")
+
+
+def _strip_control_chars(text: str) -> str:
+    return _CONTROL_STRIP.sub("", _CONTROL_TO_NEWLINE.sub("\n", text))
+
+
+def mirror_header_hash(mirror_path: Path) -> str | None:
+    """Return the sha256 recorded in an existing mirror's header, if any."""
+
+    match = _read_mirror_header(mirror_path)
+    return match.group("sha") if match else None
+
+
+def _read_mirror_header(mirror_path: Path):
+    try:
+        with mirror_path.open("r", encoding="utf-8") as handle:
+            first_line = handle.readline().rstrip("\n")
+    except OSError:
+        return None
+    return _MIRROR_HEADER.match(first_line)
+
+
+def _mirror_format_current(mirror_path: Path) -> bool:
+    """True only if the mirror's recorded format version is current."""
+
+    match = _read_mirror_header(mirror_path)
+    if match is None:
+        return False
+    recorded = match.group("format")
+    return recorded is not None and int(recorded) == _MIRROR_FORMAT_VERSION
+
+
+def _dehyphenate_page(page_text: str) -> str:
+    """Join a line-end hyphenated word with the start of the next line.
+
+    ``compres-\\nsion`` becomes ``compression`` only when the joined word is
+    lowercase alphabetic; anything else is left untouched.
+    """
+
+    lines = page_text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = _HYPHEN_JOIN.search(line)
+        if match and index + 1 < len(lines):
+            next_line = lines[index + 1]
+            tail_match = re.match(r"(\w+)", next_line)
+            if tail_match:
+                joined = match.group(1) + tail_match.group(1)
+                if joined.isalpha() and joined.islower():
+                    merged = (
+                        line[: match.start()]
+                        + joined
+                        + next_line[tail_match.end() :]
+                    )
+                    out.append(merged)
+                    index += 2
+                    continue
+        out.append(line)
+        index += 1
+    return "\n".join(out)
+
+
+def _clean_page_text(page_text: str) -> str:
+    joined = _dehyphenate_page(page_text)
+    return _BLANK_RUN.sub("\n\n", joined)
+
+
+def write_pdf_mirror(
+    pdf_path: Path, mirror_path: Path, data: bytes, *, rel_path: str | None = None
+) -> bool:
+    """Write (or refresh) the Markdown mirror for a PDF source.
+
+    Returns ``True`` if the mirror was (re)written, ``False`` when the PDF's
+    current sha256 matches the hash already recorded in the mirror's header
+    (the mirror file is then left untouched, mtime included). Extraction and
+    writing stay page-by-page: at most one page's text is held beyond what
+    pypdf itself holds, and the mirror is written to a temporary file first
+    so a mid-extraction failure never leaves a partial mirror in place.
+    """
+
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise UnsupportedDocumentError(
+            "PDF support requires the pypdf dependency"
+        ) from exc
+
+    file_hash = hashlib.sha256(data).hexdigest()
+    if (
+        mirror_path.is_file()
+        and mirror_header_hash(mirror_path) == file_hash
+        and _mirror_format_current(mirror_path)
+    ):
+        return False
+
+    rel = rel_path if rel_path is not None else pdf_path.name
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        page_count = len(reader.pages)
+    except Exception as exc:
+        raise UnsupportedDocumentError(
+            f"could not extract text from PDF {pdf_path}: {exc}"
+        ) from exc
+
+    mirror_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = mirror_path.with_suffix(mirror_path.suffix + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(
+                f"<!-- docmesh mirror of {rel} sha256={file_hash} "
+                f"pages={page_count} format={_MIRROR_FORMAT_VERSION} -->\n"
+            )
+            for page_number in range(page_count):
+                try:
+                    page_text = reader.pages[page_number].extract_text() or ""
+                except Exception as exc:
+                    raise UnsupportedDocumentError(
+                        f"could not extract text from PDF {pdf_path}: {exc}"
+                    ) from exc
+                handle.write(f"\n## Page {page_number + 1}\n\n")
+                handle.write(_strip_control_chars(_clean_page_text(page_text)))
+                handle.write("\n")
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    tmp_path.replace(mirror_path)
+    return True
 
 
 def parse_file(

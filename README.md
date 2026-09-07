@@ -110,7 +110,8 @@ The plugin ships four skills that define the workflows:
 - **`docmesh-search`** — ordinary `search` / `find` / `read` for bounded
   questions. Search is precision-oriented; `find` exhaustively enumerates
   literal or regex occurrences; `read` returns current source with revision
-  revalidation (PDFs are read by page).
+  revalidation (a PDF is indexed via a generated Markdown mirror and read by
+  page, reporting both the mirror path and the origin PDF).
 - **`docmesh-global-edit`** — conceptual or terminology changes, corrections,
   rewrites, removals, and consistency passes. Even when the request points at
   one paragraph, it runs global discovery first, because the same idea may

@@ -149,7 +149,11 @@ def infer_role(
     if marker:
         return "mirror", "generated or mirror path detected", marker
     if fmt == "pdf":
-        return "reference", "PDFs are reference evidence in V1", None
+        return (
+            "reference",
+            "PDFs are reference evidence in V1; indexed via a generated Markdown mirror",
+            None,
+        )
     return "editable", "supported editable text source", None
 
 

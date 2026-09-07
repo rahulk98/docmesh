@@ -25,7 +25,7 @@ from .models import (
     StaleSourceError,
     ValidationError,
 )
-from .parsing import line_at, parse_file, span_text
+from .parsing import parse_file, span_text
 
 RRF_K = 60
 DEFAULT_RESULT_LIMIT = 8
@@ -116,16 +116,6 @@ def _span_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _pdf_match_fields(page_text: str, match: re.Match[str]) -> tuple[str, str, int, int]:
-    """(matched line, match-centered snippet, start column, end column) for a PDF match."""
-
-    matched_line = line_at(page_text, _line_for_offset(page_text, match.start()))
-    snippet = _bounded(page_text[max(0, match.start() - 100) : match.end() + 100])
-    start_column = match.start() - page_text.rfind("\n", 0, match.start())
-    end_column = match.end() - page_text.rfind("\n", 0, match.end())
-    return _bounded(matched_line), snippet, start_column, end_column
-
-
 def _row_mapping(row: RowLike) -> dict[str, Any]:
     if isinstance(row, sqlite3.Row):
         return dict(zip(row.keys(), row))
@@ -135,32 +125,10 @@ def _row_mapping(row: RowLike) -> dict[str, Any]:
 class RetrievalService:
     def __init__(self, indexer: Indexer) -> None:
         self.indexer = indexer
-        self._pdf_hash_cache: dict[str, tuple[tuple[int, float], str]] = {}
 
     @property
     def store(self) -> SQLiteIndex:
         return self.indexer.store
-
-    def _ensure_pdf_current(self, path: str) -> str:
-        """Cheap size/mtime precheck; sha256 (and reindex-if-changed) at
-        most once per file per RetrievalService instance (one instance per
-        top-level api.py call). Never extracts PDF text: pypdf extraction
-        is both slow and, on pathological PDFs, not stable across process
-        runs (F-paper-4), so file identity -- not re-extracted content --
-        is the only thing that can mark a stored PDF span stale. Returns
-        the file's current sha256 hex digest.
-        """
-        stat = Path(path).stat()
-        signature = (stat.st_size, stat.st_mtime)
-        cached = self._pdf_hash_cache.get(path)
-        if cached is not None and cached[0] == signature:
-            return cached[1]
-        current_hash = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        document = self.store.document(path)
-        if document is None or str(document["file_hash"]) != current_hash:
-            self.indexer.index(paths=[path])
-        self._pdf_hash_cache[path] = (signature, current_hash)
-        return current_hash
 
     def _reconcile_freshness(self) -> None:
         # A query is a synchronization boundary, but the naive form of that
@@ -228,67 +196,14 @@ class RetrievalService:
             watermark = max(watermark, float(newest[0]))
         return watermark
 
-    def _reconstruct_pdf_pages(self, path: str) -> dict[int, str]:
-        """Rebuild each PDF page's text from its already-stored chunks.
-
-        Chunking splits a page into ordered pieces carrying their original
-        ``start_line``/``end_line``. Most pieces span whole lines and join
-        back with ``"\\n"``; a line too long for one chunk is instead split
-        into same-line word pieces that must be concatenated directly (they
-        already carry their own trailing whitespace) or the reconstruction
-        silently drops spaces within that line (caught via a real span_hash
-        mismatch further downstream, F-paper-4). This never re-invokes pypdf
-        at query time (F-find-1). Valid only once the document row is
-        current, which callers must ensure (``_reconcile_freshness``).
-        """
-        by_page: dict[int, list[sqlite3.Row]] = {}
-        for row in self.store.chunks(path):
-            page = row["page"]
-            if page is None:
-                continue
-            by_page.setdefault(int(page), []).append(row)
-        pages: dict[int, str] = {}
-        for page, rows in by_page.items():
-            rows.sort(key=lambda item: int(item["ordinal"]))
-            parts: list[str] = []
-            prev_end_line: int | None = None
-            for row in rows:
-                start_line = int(row["start_line"])
-                if prev_end_line is not None and start_line != prev_end_line:
-                    parts.append("\n" * (start_line - prev_end_line))
-                parts.append(str(row["text"]))
-                prev_end_line = int(row["end_line"])
-            pages[page] = "".join(parts)
-        return pages
-
     def _location_for_row(self, row: RowLike) -> SourceLocation:
         values = _row_mapping(row)
         path = canonical_path(str(values["document_path"]))
         fmt = str(values["format"])
         role = str(values["role"])
         stored_file_hash = str(values["file_hash"])
-        if fmt == "pdf":
-            page = int(values["page"] or 1)
-            # PDFs are read-only reference/mirror sources (AGENTS.md): only
-            # the file itself changing can invalidate a stored span, so a
-            # cheap hash check (never a re-extraction) is enough, and
-            # validate_location later recomputes span_hash the same way
-            # (_reconstruct_pdf_pages) so the two never disagree over a
-            # pypdf non-determinism (F-paper-4).
-            self._ensure_pdf_current(path)
-            page_text = self._reconstruct_pdf_pages(path).get(
-                page, str(values["text"])
-            )
-            return SourceLocation(
-                path,
-                str(values["breadcrumb"]),
-                page=page,
-                span_hash=_span_hash(page_text),
-                file_hash=stored_file_hash,
-                snippet=_bounded(page_text),
-                role=role,
-                format=fmt,
-            )
+        generated_from = values.get("generated_from")
+        page = values.get("page")
         content = str(values["content"]) if "content" in values else ""
         start = int(values["start_line"])
         end = int(values["end_line"])
@@ -301,12 +216,13 @@ class RetrievalService:
             str(values["breadcrumb"]),
             start,
             end,
-            None,
+            int(page) if page is not None else None,
             _span_hash(exact),
             stored_file_hash,
             _bounded(exact),
             role,
             fmt,
+            str(generated_from) if generated_from else None,
         )
 
     def _location_for_chunk_row(self, row: RowLike) -> SourceLocation:
@@ -320,30 +236,40 @@ class RetrievalService:
             merged["file_hash"] = document["file_hash"]
             merged["role"] = document["role"]
             merged["format"] = document["format"]
+            merged["generated_from"] = document["generated_from"]
         return self._location_for_row(merged)
 
-    def _breadcrumb_index(self, path: str) -> tuple[list[int], list[tuple[int, str]]]:
-        """One DB read per document: (sorted start_lines, [(end_line, breadcrumb)])."""
+    def _breadcrumb_index(
+        self, path: str
+    ) -> tuple[list[int], list[tuple[int, str, int | None]]]:
+        """One DB read per document: (sorted start_lines, [(end_line, breadcrumb, page)])."""
         entries = sorted(
             (
-                (int(row["start_line"]), int(row["end_line"]), str(row["breadcrumb"]))
+                (
+                    int(row["start_line"]),
+                    int(row["end_line"]),
+                    str(row["breadcrumb"]),
+                    row["page"],
+                )
                 for row in self.store.chunks(path)
             )
         )
         starts = [entry[0] for entry in entries]
-        rest = [(entry[1], entry[2]) for entry in entries]
+        rest = [(entry[1], entry[2], entry[3]) for entry in entries]
         return starts, rest
 
     @staticmethod
     def _breadcrumb_for_line(
-        index: tuple[list[int], list[tuple[int, str]]], line: int
-    ) -> str:
+        index: tuple[list[int], list[tuple[int, str, int | None]]], line: int
+    ) -> tuple[str, int | None]:
         starts, rest = index
         pos = bisect.bisect_right(starts, line) - 1
         if pos < 0:
-            return ""
-        end_line, breadcrumb = rest[pos]
-        return breadcrumb if line <= end_line else ""
+            return "", None
+        end_line, breadcrumb, page = rest[pos]
+        if line <= end_line:
+            return breadcrumb, (int(page) if page is not None else None)
+        return "", None
 
     def validate_location(self, location: SourceLocation) -> SourceLocation:
         """Validate revision, line/page range, and exact span content."""
@@ -351,53 +277,20 @@ class RetrievalService:
         path = Path(canonical_path(location.path))
         if not path.exists() or not path.is_file():
             raise StaleSourceError(f"source no longer exists: {path}")
-        if location.format == "pdf" or path.suffix.lower() == ".pdf":
-            # PDFs are always read-only reference/mirror sources (AGENTS.md):
-            # only the file itself changing can invalidate a stored span, so
-            # this never re-extracts text (F-paper-4: pypdf extraction is
-            # both the slow part and, on pathological PDFs, not stable
-            # across process runs -- re-extracting to "validate" was itself
-            # a source of false staleness).
-            current_hash = self._ensure_pdf_current(str(path))
-            if location.file_hash and current_hash != location.file_hash:
-                raise StaleSourceError(f"source revision changed: {path}")
-            document = self.store.document(str(path))
-            if document is None:
-                raise StaleSourceError(f"source no longer indexed: {path}")
-            current_role = str(document["role"])
-            pages = self._reconstruct_pdf_pages(str(path))
-            if (
-                location.page is None
-                or location.page < 1
-                or location.page > len(pages)
-            ):
-                raise StaleSourceError(
-                    f"PDF page is outside the current document: {path}"
-                )
-            page_text = pages.get(location.page, "")
-            page_hash = _span_hash(page_text)
-            if location.span_hash and page_hash != location.span_hash:
-                raise StaleSourceError(
-                    f"PDF page content changed: {path} page {location.page}"
-                )
-            return SourceLocation(
-                str(path),
-                location.breadcrumb,
-                page=location.page,
-                span_hash=page_hash,
-                file_hash=current_hash,
-                snippet=_bounded(page_text),
-                role=current_role,
-                format="pdf",
-            )
+        # PDFs are indexed only via their generated Markdown mirror, which is
+        # an ordinary text file on disk; the general path below (fresh read,
+        # fresh hash, fresh span) is correct for it without ever touching
+        # pypdf again.
         data = path.read_bytes()
         current_hash = hashlib.sha256(data).hexdigest()
         if location.file_hash and current_hash != location.file_hash:
             raise StaleSourceError(f"source revision changed: {path}")
         document = self.store.document(str(path))
+        generated_from = None
         if document is not None:
             current_role = str(document["role"])
             current_format = str(document["format"])
+            generated_from = document["generated_from"]
         else:
             current_role, _, _ = infer_role(
                 path, source_format(path), root=self.indexer.root
@@ -426,12 +319,13 @@ class RetrievalService:
             location.breadcrumb,
             location.start_line,
             location.end_line,
-            None,
+            location.page,
             exact_hash,
             current_hash,
             _bounded(exact),
             current_role,
             current_format,
+            str(generated_from) if generated_from else None,
         )
 
     def search(
@@ -589,38 +483,14 @@ class RetrievalService:
             ):
                 continue
             if row["format"] == "pdf":
-                # ``_reconcile_freshness`` already guarantees this row is
-                # current; reconstruct page text from stored chunks instead
-                # of re-invoking pypdf here (F-find-1: the previous version
-                # re-extracted every PDF's text on every find() call).
-                pages = self._reconstruct_pdf_pages(path)
-                for page_number in sorted(pages):
-                    page_text = pages[page_number]
-                    for match in expression.finditer(page_text):
-                        line_text, snippet, start_col, end_col = _pdf_match_fields(
-                            page_text, match
-                        )
-                        results.append(
-                            FindResult(
-                                SourceLocation(
-                                    path,
-                                    f"Page {page_number}",
-                                    page=page_number,
-                                    span_hash=_span_hash(page_text),
-                                    file_hash=row["file_hash"],
-                                    snippet=snippet,
-                                    role=row["role"],
-                                    format="pdf",
-                                ),
-                                match.group(0),
-                                line_text,
-                                start_col,
-                                end_col,
-                            )
-                        )
+                # A PDF's own placeholder row carries no content -- only its
+                # generated mirror is chunked and searchable.
                 continue
             text = row["content"]
-            breadcrumb_index: tuple[list[int], list[tuple[int, str]]] | None = None
+            generated_from = row["generated_from"]
+            breadcrumb_index: (
+                tuple[list[int], list[tuple[int, str, int | None]]] | None
+            ) = None
             line_index: _LineIndex | None = None
             for match in expression.finditer(text):
                 if line_index is None:
@@ -637,19 +507,23 @@ class RetrievalService:
                 exact = line_index.span(start_line, end_line)
                 if breadcrumb_index is None:
                     breadcrumb_index = self._breadcrumb_index(path)
+                breadcrumb, page = self._breadcrumb_for_line(
+                    breadcrumb_index, start_line
+                )
                 results.append(
                     FindResult(
                         SourceLocation(
                             path,
-                            self._breadcrumb_for_line(breadcrumb_index, start_line),
+                            breadcrumb,
                             start_line,
                             end_line,
-                            None,
+                            page,
                             _span_hash(exact),
                             row["file_hash"],
                             _bounded(exact),
                             row["role"],
                             row["format"],
+                            str(generated_from) if generated_from else None,
                         ),
                         match.group(0),
                         exact,
@@ -723,27 +597,19 @@ class RetrievalService:
             role = row["role"]
             fmt = row["format"]
         if fmt == "pdf":
-            # Stored text, never a live re-extraction (F-paper-4): the row
-            # is already fresh via _reconcile_freshness above.
-            pages = self._reconstruct_pdf_pages(canonical)
-            if page is None:
-                content = str(row["content"])
-                selected_page = None
-            elif page < 1 or page > len(pages):
-                raise ValueError("PDF page is outside the document")
-            else:
-                content = pages.get(page, "")
-                selected_page = page
-            return ReadResult(
-                canonical,
-                content,
-                page=selected_page,
-                file_hash=str(row["file_hash"]),
-                role=role,
-                format="pdf",
-            )
+            # A PDF has no content of its own: it is indexed only via its
+            # generated Markdown mirror.  Redirect the read to the mirror and
+            # report both paths (mirror path, plus generated_from == the PDF).
+            mirror_row = self.store.mirror_for(canonical)
+            if mirror_row is None:
+                raise ValidationError(f"PDF has no generated mirror: {canonical}")
+            if page is None and (start_line is not None or end_line is not None):
+                return self.read(str(mirror_row["path"]), start_line, end_line, page)
+            return self._read_mirror(str(mirror_row["path"]), page, canonical)
+        if row["role"] == "mirror" and page is not None:
+            return self._read_mirror(canonical, page, str(row["generated_from"] or ""))
         if page is not None:
-            raise ValueError("page is only valid for PDF sources")
+            raise ValueError("page is only valid for PDF/mirror sources")
         parsed = parse_file(canonical)
         lines = parsed.text.splitlines()
         if not lines and start_line is None and end_line is None:
@@ -762,6 +628,44 @@ class RetrievalService:
             file_hash=parsed.file_hash,
             role=role,
             format=fmt,
+        )
+
+    def _read_mirror(
+        self, mirror_path: str, page: int | None, generated_from: str
+    ) -> ReadResult:
+        """Read a mirror by page (its ``## Page N`` span) or in full."""
+
+        parsed = parse_file(mirror_path)
+        if page is None:
+            return ReadResult(
+                mirror_path,
+                parsed.text,
+                file_hash=parsed.file_hash,
+                role="mirror",
+                format=parsed.format,
+                generated_from=generated_from or None,
+            )
+        target = f"Page {page}"
+        section = next(
+            (
+                item
+                for item in parsed.sections
+                if item.breadcrumb and item.breadcrumb[-1] == target
+            ),
+            None,
+        )
+        if section is None:
+            raise ValueError("PDF page is outside the document")
+        return ReadResult(
+            mirror_path,
+            span_text(parsed.text, section.start_line, section.end_line),
+            section.start_line,
+            section.end_line,
+            page=page,
+            file_hash=parsed.file_hash,
+            role="mirror",
+            format=parsed.format,
+            generated_from=generated_from or None,
         )
 
 

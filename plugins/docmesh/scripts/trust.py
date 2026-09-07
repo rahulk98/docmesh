@@ -111,10 +111,17 @@ TOOL_SCHEMAS: dict[str, dict] = {
         "phase": {"type": "string", "enum": ["discover", "verify"]},
         "query_bundle": {"type": "object"},
         "source_roles": {"type": "array", "items": {"type": "string"}},
+        "roles": {"type": "array", "items": {"type": "string"}},
         "page_size": {"type": "integer"},
         "baseline_run_id": {"type": "string"},
     },
-    "impact_page": {**_ROOT, "run_id": {"type": "string"}, "cursor": {"type": ["string", "integer"]}},
+    "impact_page": {
+        **_ROOT,
+        "run_id": {"type": "string"},
+        "cursor": {"type": ["string", "integer"]},
+        "page_size": {"type": "integer"},
+        "snippet_only": {"type": "boolean"},
+    },
     "impact_read": {
         **_ROOT,
         "run_id": {"type": "string"},
@@ -124,7 +131,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
     "impact_classify": {
         **_ROOT,
         "run_id": {"type": "string"},
-        "decisions": {"type": "object"},
+        "decisions": {"type": ["object", "array"]},
     },
     "impact_finish": {**_ROOT, "run_id": {"type": "string"}},
 }

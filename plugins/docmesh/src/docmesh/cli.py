@@ -109,7 +109,13 @@ def execute(args: argparse.Namespace) -> Any:
             baseline_run_id=args.baseline_run_id,
         )
     if operation == "impact_page":
-        return api.impact_page(**common, run_id=args.run_id or "", cursor=args.cursor)
+        return api.impact_page(
+            **common,
+            run_id=args.run_id or "",
+            cursor=args.cursor,
+            page_size=args.page_size,
+            snippet_only=True if args.snippet_only is None else args.snippet_only,
+        )
     if operation == "impact_read":
         return api.impact_read(
             **common,

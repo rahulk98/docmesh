@@ -9,6 +9,31 @@ AGENTS.md) and adds its own `## [x.y.z]` heading below.
 - Impact candidates reloaded through `impact_page`/`impact_read` keep their
   `match_kind` and `matched_terms` instead of collapsing to `semantic_only`;
   the stale-source retry path now carries them forward too.
+- PDFs are no longer indexed directly: each PDF gets a generated Markdown
+  mirror at `.docmesh/mirrors/<relative pdf path>.md` (header comment with
+  sha256, page count, and format version; `## Page N` headings; line-end
+  hyphenation joined; blank runs collapsed; NUL and C0 control characters
+  stripped), which is indexed as a role-`mirror` document with
+  `generated_from` pointing at the PDF. `search`/`find` results on PDFs now
+  carry real line numbers plus a page number, and `read --path x.pdf --page
+  N` (and `--start-line`/`--end-line`) resolve against the mirror. A mirror
+  regenerates only when the PDF's hash or the mirror format changes; a
+  missing mirror is rebuilt on a plain reindex; removing a PDF removes its
+  mirror and index rows. The query-time PDF text paths in retrieval were
+  removed now that PDFs route through mirrors.
+- `impact_start` discovery scopes candidates to `source_roles` (defaulting to
+  `["editable"]`) and reports the effective roles on the run.
+- `impact_page` gained `page_size` (capped at 200) and `snippet_only`
+  (default true) parameters, and the harness now honors `snippet_only`
+  correctly over the CLI and MCP by respecting a result's own `to_dict`.
+- `impact_classify` accepts selector entries (`match_kind`, `role`,
+  `path_prefix`) that bulk-classify all still-unclassified candidates
+  matching the selector; an explicit per-candidate decision always overrides
+  a bulk one.
+- `impact_classify` and `impact_finish` now return count summaries (classify:
+  counts by classification and by match_kind; finish: counts by
+  classification, by match_kind, the selectors applied, and an edit
+  inventory summary) instead of echoing the whole run back.
 
 ## [1.2.0] - 2026-09-07
 
