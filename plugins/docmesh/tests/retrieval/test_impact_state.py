@@ -149,6 +149,31 @@ def test_candidates_are_tagged_with_match_kind_and_ordered_exact_first(
     assert run.metrics["semantic_only_dropped"] == 0
 
 
+def test_reloaded_page_preserves_exact_term_match_kind_and_matches_aggregate(
+    tmp_path: Path,
+) -> None:
+    # Regression: _candidate_from_mapping (the persisted-run reload path used
+    # by impact_page) must round-trip match_kind/matched_terms, not silently
+    # default every reloaded candidate back to semantic_only.
+    engine = _engine(tmp_path)
+    run = engine.impact_start(
+        query_bundle=ImpactQueryBundle(
+            "cache policy",
+            exact_terms=["cache policy"],
+            semantic_queries=["storage rules"],
+        ),
+        page_size=20,
+    )
+    page = engine.impact_page(run.run_id)
+    exact = [c for c in page.candidates if c.match_kind == "exact_term"]
+    assert exact
+    assert "cache policy" in exact[0].matched_terms
+    tally = {}
+    for candidate in page.candidates:
+        tally[candidate.match_kind] = tally.get(candidate.match_kind, 0) + 1
+    assert tally == run.metrics["by_match_kind"]
+
+
 def test_semantic_limit_caps_semantic_only_candidates_and_reports_the_cap(
     tmp_path: Path,
 ) -> None:

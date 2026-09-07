@@ -4,6 +4,12 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
+## [Unreleased]
+
+- Impact candidates reloaded through `impact_page`/`impact_read` keep their
+  `match_kind` and `matched_terms` instead of collapsing to `semantic_only`;
+  the stale-source retry path now carries them forward too.
+
 ## [1.2.0] - 2026-09-07
 
 - `find` no longer re-extracts a PDF's text per query and per query-match

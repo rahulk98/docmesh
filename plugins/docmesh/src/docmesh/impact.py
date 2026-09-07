@@ -55,6 +55,8 @@ def _candidate_from_mapping(value: Mapping[str, Any]) -> ImpactCandidate:
         classification=value.get("classification"),
         read=bool(value.get("read", False)),
         resolved=bool(value.get("resolved", True)),
+        match_kind=str(value.get("match_kind", "semantic_only")),
+        matched_terms=list(value.get("matched_terms", []) or []),
     )
 
 
@@ -215,6 +217,8 @@ class ImpactEngine:
                         str(row["text"]),
                         candidate.channels,
                         candidate.retrieval_scores,
+                        match_kind=candidate.match_kind,
+                        matched_terms=candidate.matched_terms,
                     )
                     break
             if fresh is None:
