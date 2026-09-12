@@ -8,6 +8,7 @@ import logging
 import re
 import sqlite3
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
@@ -43,6 +44,7 @@ from .models import (
     Manifest,
     ModelNotInstalledError,
     UnsupportedDocumentError,
+    ValidationError,
 )
 from .parsing import ParsedDocument, parse_file, write_pdf_mirror
 
@@ -50,6 +52,7 @@ _logger = logging.getLogger("docmesh.index")
 
 SCHEMA_VERSION = "1"
 FTS_SYNC_VERSION = "1"
+PROJECT_ROOT_METADATA_KEY = "project_root"
 
 # Embedding is batched so onnxruntime never materializes one giant tensor:
 # a batch of N passages needs N x seq_len x hidden_dim x 2 bytes of
@@ -357,6 +360,151 @@ class SQLiteIndex:
 
     def set_corpus_revision(self, value: str) -> None:
         self.set_metadata("corpus_revision", value)
+
+    def has_persisted_index_state(self) -> bool:
+        """Return whether this database contains state tied to a project.
+
+        A database created by an older DocMesh release has no project-root
+        marker.  Before a full repair, callers must treat every stored source
+        path as opaque metadata: probing those paths would guess which old
+        checkout the database belonged to.  This check is intentionally
+        database-only and never touches the filesystem.
+        """
+
+        for table in ("documents", "chunks", "vectors", "impact_runs", "baselines"):
+            row = self.conn.execute(
+                f"SELECT 1 FROM {table} LIMIT 1"
+            ).fetchone()
+            if row is not None:
+                return True
+        return False
+
+    @staticmethod
+    def _relocated_path(
+        value: str | None, old_root: Path, new_root: Path
+    ) -> str | None:
+        """Rebase one known in-project path while preserving external paths."""
+
+        if value is None:
+            return None
+        path = Path(str(value))
+        try:
+            relative = path.relative_to(old_root)
+        except ValueError:
+            return value
+        return str(new_root / relative)
+
+    def relocate_document_paths(self, old_root: str | Path, new_root: str | Path) -> int:
+        """Move indexed in-project paths to a new project root.
+
+        The caller owns the surrounding transaction.  Documents are staged at
+        temporary paths before their child chunks are moved, so this remains
+        safe even when the new root is nested below the old root and a target
+        path is itself another source row.  Chunk IDs, vectors, content, and
+        FTS rows are retained; only path columns change.  Impact payloads and
+        baselines are deliberately untouched because they are immutable
+        historical state and must become stale after relocation.
+        """
+
+        old_root_path = Path(canonical_path(old_root))
+        new_root_path = Path(canonical_path(new_root))
+        if old_root_path == new_root_path:
+            return 0
+
+        rows = list(
+            self.conn.execute(
+                "SELECT path, role, format, content, file_hash, indexed_at, active, generated_from "
+                "FROM documents ORDER BY path"
+            )
+        )
+        mapping: dict[str, str] = {}
+        values: dict[str, sqlite3.Row] = {}
+        for row in rows:
+            path = str(row["path"])
+            relocated = self._relocated_path(path, old_root_path, new_root_path)
+            if relocated is not None and relocated != path:
+                mapping[path] = relocated
+                values[path] = row
+
+        if not mapping:
+            return 0
+        if len(set(mapping.values())) != len(mapping):
+            raise ValidationError(
+                "project relocation would map multiple indexed sources to one path"
+            )
+
+        existing_paths = {str(row["path"]) for row in rows}
+        mapped_sources = set(mapping)
+        collisions = sorted(
+            target
+            for target in mapping.values()
+            if target in existing_paths and target not in mapped_sources
+        )
+        if collisions:
+            raise ValidationError(
+                "project relocation path collision: " + ", ".join(collisions)
+            )
+
+        token = uuid.uuid4().hex
+        temporary: dict[str, str] = {
+            source: f"__docmesh_relocation__/{token}/{index}"
+            for index, source in enumerate(sorted(mapping))
+        }
+
+        # Stage all rows first.  This keeps the original parents available
+        # while their child chunks are moved under the temporary parents.
+        for source, temp in temporary.items():
+            row = values[source]
+            self.conn.execute(
+                "INSERT INTO documents(path,role,format,content,file_hash,indexed_at,active,generated_from) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    temp,
+                    row["role"],
+                    row["format"],
+                    row["content"],
+                    row["file_hash"],
+                    row["indexed_at"],
+                    row["active"],
+                    row["generated_from"],
+                ),
+            )
+
+        for source, temp in temporary.items():
+            self.conn.execute(
+                "UPDATE chunks SET document_path=? WHERE document_path=?",
+                (temp, source),
+            )
+            self.conn.execute("DELETE FROM documents WHERE path=?", (source,))
+
+        # At this point no old source row remains, so nested-root moves and
+        # path chains cannot collide with an as-yet-unmoved source.
+        for source, temp in temporary.items():
+            row = values[source]
+            target = mapping[source]
+            generated_from = self._relocated_path(
+                row["generated_from"], old_root_path, new_root_path
+            )
+            self.conn.execute(
+                "INSERT INTO documents(path,role,format,content,file_hash,indexed_at,active,generated_from) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    target,
+                    row["role"],
+                    row["format"],
+                    row["content"],
+                    row["file_hash"],
+                    row["indexed_at"],
+                    row["active"],
+                    generated_from,
+                ),
+            )
+            self.conn.execute(
+                "UPDATE chunks SET document_path=? WHERE document_path=?",
+                (target, temp),
+            )
+            self.conn.execute("DELETE FROM documents WHERE path=?", (temp,))
+        return len(mapping)
 
     def document(self, path: str) -> sqlite3.Row | None:
         return self.conn.execute(
@@ -676,6 +824,9 @@ class Indexer:
                 default_db.parent.mkdir(parents=True, exist_ok=True)
                 db_path = str(default_db)
             self.store = SQLiteIndex(db_path)
+        self._legacy_root_unknown = False
+        self._relocated_project = False
+        self._bind_project_root()
         supplied_embedder = embedder is not None
         if embedder is not None:
             self.embedder: EmbeddingBackend | None = embedder
@@ -757,6 +908,62 @@ class Indexer:
     @property
     def sqlite_vec_available(self) -> bool:
         return self.store.sqlite_vec_available
+
+    @property
+    def legacy_root_unknown(self) -> bool:
+        """Whether this database needs a safe full-scan repair first."""
+
+        return self._legacy_root_unknown
+
+    @property
+    def relocated_project(self) -> bool:
+        """Whether this Indexer rebased a trusted database on construction."""
+
+        return self._relocated_project
+
+    def _bind_project_root(self) -> None:
+        """Bind, safely repair, or migrate the database's project root.
+
+        The persisted root is the only authority for an automatic path
+        migration.  A non-empty legacy database without that marker is left
+        untouched until ``index()`` performs a complete current-root scan.
+        """
+
+        current_root = canonical_path(self.root)
+        stored_root = self.store.get_metadata(PROJECT_ROOT_METADATA_KEY)
+        if stored_root is None:
+            if self.store.has_persisted_index_state():
+                self._legacy_root_unknown = True
+                return
+            self.store.set_metadata(PROJECT_ROOT_METADATA_KEY, current_root)
+            return
+
+        old_root = canonical_path(str(stored_root))
+        if old_root == current_root:
+            return
+
+        # Path migration and generation invalidation share one transaction.
+        # Baseline/run JSON is intentionally not rewritten: the old sealed
+        # snapshot must fail its existing revision/generation checks.
+        with self.store.conn:
+            self.store.relocate_document_paths(old_root, current_root)
+            next_generation = self.store.edit_generation + 1
+            self.store.conn.execute(
+                "INSERT INTO metadata(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (PROJECT_ROOT_METADATA_KEY, current_root),
+            )
+            self.store.conn.execute(
+                "INSERT INTO metadata(key,value) VALUES('edit_generation',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(next_generation),),
+            )
+            self.store.conn.execute(
+                "INSERT INTO metadata(key,value) VALUES('corpus_revision',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (self._compute_indexed_revision(),),
+            )
+        self._relocated_project = True
 
     def _chunker(self) -> Chunker:
         if self.embedder is None:
@@ -878,7 +1085,9 @@ class Indexer:
         mirror_vectors = self._embed_chunk_batches(mirror_chunks)
         self.store.replace_document(mirror_parsed, mirror_chunks, mirror_vectors)
 
-    def _remove_document_and_mirror(self, path: str) -> None:
+    def _remove_document_and_mirror(
+        self, path: str, *, remove_mirror_file: bool = True
+    ) -> None:
         row = self.store.document(path)
         if row is not None and str(row["format"]) == "pdf":
             mirror_row = self.store.mirror_for(path)
@@ -889,10 +1098,11 @@ class Indexer:
             )
             if mirror_row is not None:
                 self.store.remove_document(str(mirror_path))
-            try:
-                mirror_path.unlink()
-            except OSError:
-                pass
+            if remove_mirror_file:
+                try:
+                    mirror_path.unlink()
+                except OSError:
+                    pass
         self.store.remove_document(path)
 
     def _current_discovery(self) -> list[DiscoveryItem]:
@@ -978,8 +1188,14 @@ class Indexer:
             raise ModelNotInstalledError(
                 "FastEmbed model is not loaded; status/doctor are read-only"
             )
+        if self._legacy_root_unknown and paths is not None:
+            raise ValidationError(
+                "legacy index has no persisted project root; run a full index scan "
+                "before indexing selected paths"
+            )
         changed = self._refresh_vectors_if_strategy_changed()
         full_scan = paths is None
+        legacy_repair = self._legacy_root_unknown and full_scan
         discovery = self._current_discovery() if full_scan else None
         items: list[DiscoveryItem]
         if discovery is not None:
@@ -1055,8 +1271,43 @@ class Indexer:
         if full_scan:
             existing_paths = self.store.document_paths()
             for path in sorted(existing_paths - seen):
-                self._remove_document_and_mirror(path)
+                self._remove_document_and_mirror(
+                    path, remove_mirror_file=not legacy_repair
+                )
                 changed = True
+        if legacy_repair:
+            # A full scan has now established the current root from live
+            # discovery and removed every stale source row without probing its
+            # old absolute path.  Treat the repair as a generation boundary so
+            # any legacy impact state cannot be mistaken for a current run.
+            with self.store.conn:
+                self.store.conn.execute(
+                    "INSERT INTO metadata(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (PROJECT_ROOT_METADATA_KEY, canonical_path(self.root)),
+                )
+                generation = self.store.edit_generation + 1
+                self.store.conn.execute(
+                    "INSERT INTO metadata(key,value) VALUES('edit_generation',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (str(generation),),
+                )
+                self.store.conn.execute(
+                    "INSERT INTO metadata(key,value) VALUES('corpus_revision',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (self._compute_indexed_revision(),),
+                )
+            self._legacy_root_unknown = False
+            warnings.append(
+                {
+                    "path": canonical_path(self.root),
+                    "reason": (
+                        "legacy index had no persisted project root; performed a "
+                        "safe full reindex and discarded unreachable stored paths"
+                    ),
+                }
+            )
+            changed = False
         if changed:
             generation = self.store.edit_generation + 1
             self.store.set_edit_generation(generation)
@@ -1079,7 +1330,13 @@ class Indexer:
         return digest.hexdigest()
 
     def current_file_hashes(self) -> dict[str, str]:
-        paths = self.store.document_paths()
+        # Never probe paths from an unbound legacy database.  Until a full
+        # repair establishes the current root, those absolute strings may
+        # belong to an unrelated checkout and are not authorization to read
+        # them.
+        paths: set[str] = set()
+        if not self._legacy_root_unknown:
+            paths.update(self.store.document_paths())
         try:
             paths.update(item.path for item in self._current_discovery())
         except (FileNotFoundError, NotADirectoryError):
@@ -1147,5 +1404,20 @@ class Indexer:
             ),
             model_cache_dir=str(self.model_cache_dir),
             skipped_documents=list(skipped_documents or []),
-            warnings=list(warnings or []),
+            warnings=(
+                list(warnings or [])
+                + (
+                    [
+                        {
+                            "path": canonical_path(self.root),
+                            "reason": (
+                                "legacy index has no persisted project root; "
+                                "run a full index scan before retrieval"
+                            ),
+                        }
+                    ]
+                    if self._legacy_root_unknown
+                    else []
+                )
+            ),
         )
