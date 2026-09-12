@@ -206,7 +206,12 @@ def test_api_impact_start_returns_only_run_id_counts_and_first_page(
     (tmp_path / "b.md").write_text(
         "# B\nThe cache policy is documented there.", encoding="utf-8"
     )
-    api.setup(project_root=tmp_path, deterministic=True, approve=True)
+    api.setup(
+        project_root=tmp_path,
+        deterministic=True,
+        approve=True,
+        download_model=False,
+    )
     result = api.impact_start(
         project_root=tmp_path,
         query_bundle={"canonical_claim": "cache policy", "exact_terms": ["cache policy"]},
@@ -357,7 +362,12 @@ def test_api_impact_classify_and_finish_return_thin_summaries_not_candidates(
     (tmp_path / "a.md").write_text(
         "# A\nThe cache policy is documented here.", encoding="utf-8"
     )
-    api.setup(project_root=tmp_path, deterministic=True, approve=True)
+    api.setup(
+        project_root=tmp_path,
+        deterministic=True,
+        approve=True,
+        download_model=False,
+    )
     start = api.impact_start(
         project_root=tmp_path,
         query_bundle={"canonical_claim": "cache policy", "exact_terms": ["cache policy"]},

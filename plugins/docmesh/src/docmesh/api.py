@@ -481,10 +481,20 @@ def impact_classify(
 
 
 def impact_finish(
-    project_root: str | Path = ".", run_id: str = "", **kwargs: Any
+    project_root: str | Path = ".",
+    run_id: str = "",
+    decisions: Any = None,
+    **kwargs: Any,
 ) -> Any:
     engine = _impact_engine(project_root, kwargs)
     try:
+        # Keep the convenience path explicit: an omitted value preserves the
+        # existing finish-only behavior, while even an empty decision set is
+        # forwarded to the engine so its normal validation/persistence rules
+        # still apply.  Reuse this engine for classification and finish so
+        # both operations observe the same index/store state.
+        if decisions is not None:
+            engine.impact_classify(run_id, decisions)
         result = engine.impact_finish(run_id)
         if isinstance(result, Baseline):
             return ImpactFinishResult(

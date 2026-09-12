@@ -36,7 +36,7 @@ from harness import (
 from trust import is_untrusted_key, tool_input_schema, validate_arguments
 from worker import run_once
 
-SERVER_VERSION = "1.3.0"
+SERVER_VERSION = "1.3.1"
 PLUGIN_CACHE_GLOBS = (
     str(Path.home() / ".claude" / "plugins" / "cache" / "docmesh" / "docmesh" / "*"),
     str(Path.home() / ".codex" / "plugins" / "cache" / "docmesh" / "docmesh" / "*"),

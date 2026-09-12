@@ -133,7 +133,11 @@ TOOL_SCHEMAS: dict[str, dict] = {
         "run_id": {"type": "string"},
         "decisions": {"type": ["object", "array"]},
     },
-    "impact_finish": {**_ROOT, "run_id": {"type": "string"}},
+    "impact_finish": {
+        **_ROOT,
+        "run_id": {"type": "string"},
+        "decisions": {"type": ["object", "array"]},
+    },
 }
 TOOL_SCHEMAS["init"] = TOOL_SCHEMAS["setup"]
 TOOL_SCHEMAS["probe-hooks"] = {

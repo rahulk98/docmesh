@@ -29,12 +29,17 @@ def _parser() -> argparse.ArgumentParser:
     return add_common_arguments(parser)
 
 
-def _json_argument(value: str | None, name: str, default: Any = None) -> Any:
+def _json_argument(value: Any, name: str, default: Any = None) -> Any:
     if value is None:
         return default
+    # The stdin fallback already decodes JSON request values before merging
+    # them into argparse's namespace.  Keep those mappings/lists intact so
+    # the same operation behaves identically through argv and stdin.
+    if isinstance(value, (Mapping, list, tuple)):
+        return value
     try:
         return json.loads(value)
-    except json.JSONDecodeError as exc:
+    except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError(f"--{name} must be JSON: {exc}") from exc
 
 
@@ -133,7 +138,13 @@ def execute(args: argparse.Namespace) -> Any:
             decisions=_json_argument(args.decisions, "decisions", {}),
         )
     if operation == "impact_finish":
-        return api.impact_finish(**common, run_id=args.run_id or "")
+        return api.impact_finish(
+            **common,
+            run_id=args.run_id or "",
+            decisions=_json_argument(args.decisions, "decisions")
+            if args.decisions is not None
+            else None,
+        )
     raise ValueError(f"unknown operation: {args.operation}")
 
 

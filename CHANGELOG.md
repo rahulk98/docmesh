@@ -4,6 +4,28 @@ All notable changes to DocMesh are listed here, grouped by version. A new
 release bumps the mirrored version (see the Versioning section in
 AGENTS.md) and adds its own `## [x.y.z]` heading below.
 
+## [1.3.1] - 2026-09-12
+
+- Interpreter selection now prefers an environment that actually has DocMesh's
+  dependencies instead of returning the first Python 3.12+ it finds, so a
+  launcher started under a newer bare `python3` (3.14.4 on the reporting
+  machine) re-execs into the plugin venv rather than failing every index
+  refresh with "FastEmbed is not installed". Virtual environments that share
+  one Python binary keep their own identity, and resolution stays offline:
+  dependency installation still happens only in an explicitly approved setup.
+- The dependency probe locates modules with `importlib.util.find_spec` instead
+  of importing them, and candidates are probed lazily in preference order.
+  Interpreter resolution on a healthy install drops from 0.37s to 0.09s per
+  process, which every hook, worker, and MCP start was paying up front.
+- Moving a repository re-roots the index instead of marking every document
+  stale under a path that no longer exists. Indexed paths inside the project
+  are rebased in one transaction, keeping chunks and vectors; impact runs and
+  baselines are deliberately left to fail their existing generation checks. A
+  database written before this marker existed is repaired by the next full
+  scan rather than by guessing which checkout it came from.
+- `impact_finish` accepts a `decisions` payload, so a batch edit can classify
+  and finish in one call instead of requiring a separate `impact_classify`.
+
 ## [1.3.0] - 2026-09-07
 
 - `read`/`find` resolve a `--path`/`--scope` argument like `grep` would:
